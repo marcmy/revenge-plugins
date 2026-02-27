@@ -1,4 +1,4 @@
-import { findAll } from "@vendetta/metro";
+import { findAll, findByProps } from "@vendetta/metro";
 import { React, i18n } from "@vendetta/metro/common";
 import { after, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
@@ -52,6 +52,20 @@ const FALLBACK_SOURCE_TOKENS = [
 ];
 
 type StringMatcher = (text: string) => boolean;
+const PRESS_HANDLER_KEYS = ["onPress", "onLongPress", "onPressIn"] as const;
+
+const BOOST_PRESS_TOKENS = [
+    "premium/subscriptions",
+    "premium-subscriptions",
+    "server-boost",
+    "guildboost",
+];
+
+const EVENTS_PRESS_TOKENS = [
+    "/events",
+    "guild-events",
+    "guildevents",
+];
 
 const normalize = (text: string) => text.replace(/\s+/g, " ").trim().toLowerCase();
 
@@ -119,6 +133,20 @@ function collectStringsDeep(value: any, out: string[] = [], depth = 0): string[]
 function matchesAnyText(props: any, matcher: StringMatcher): boolean {
     const values = collectStringsDeep(props);
     return values.some((v) => matcher(v));
+}
+
+function hasPressSourceToken(props: any, tokens: string[]): boolean {
+    for (const key of PRESS_HANDLER_KEYS) {
+        const handler = props?.[key];
+        if (typeof handler !== "function") continue;
+
+        try {
+            const src = String(handler).toLowerCase();
+            if (tokens.some((token) => src.includes(token.toLowerCase()))) return true;
+        } catch { }
+    }
+
+    return false;
 }
 
 function isPressableLike(type: any, props: any): boolean {
@@ -254,18 +282,52 @@ function patchCreateElementFallback() {
     if (!React?.createElement) return;
 
     unpatches.push(instead("createElement", React, (args, orig) => {
-        const [type, props] = args as [any, any, ...any[]];
+        const [type, props, ...children] = args as [any, any, ...any[]];
 
         if (!props || !isPressableLike(type, props)) {
             return orig(...args);
         }
 
-        const hideBoosts = storage.hideServerBoosts && matchesAnyText(props, isServerBoostText);
-        const hideEvents = storage.hideEvents && matchesAnyText(props, isEventsText);
+        const combined = children.length ? { ...props, children } : props;
+
+        const hideBoosts = storage.hideServerBoosts && (
+            matchesAnyText(combined, isServerBoostText)
+            || hasPressSourceToken(props, BOOST_PRESS_TOKENS)
+        );
+        const hideEvents = storage.hideEvents && (
+            matchesAnyText(combined, isEventsText)
+            || hasPressSourceToken(props, EVENTS_PRESS_TOKENS)
+        );
 
         if (hideBoosts || hideEvents) return null;
         return orig(...args);
     }));
+}
+
+function patchJsxRuntimeFallback() {
+    const jsxRuntime = findByProps("jsx", "jsxs");
+    if (!jsxRuntime) return;
+
+    for (const method of ["jsx", "jsxs"] as const) {
+        if (typeof jsxRuntime[method] !== "function") continue;
+
+        unpatches.push(instead(method, jsxRuntime, (args, orig) => {
+            const [type, props] = args as [any, any, ...any[]];
+            if (!props || !isPressableLike(type, props)) return orig(...args);
+
+            const hideBoosts = storage.hideServerBoosts && (
+                matchesAnyText(props, isServerBoostText)
+                || hasPressSourceToken(props, BOOST_PRESS_TOKENS)
+            );
+            const hideEvents = storage.hideEvents && (
+                matchesAnyText(props, isEventsText)
+                || hasPressSourceToken(props, EVENTS_PRESS_TOKENS)
+            );
+
+            if (hideBoosts || hideEvents) return null;
+            return orig(...args);
+        }));
+    }
 }
 
 export default {
@@ -274,6 +336,7 @@ export default {
         storage.hideEvents ??= false;
         patchTargets();
         patchCreateElementFallback();
+        patchJsxRuntimeFallback();
     },
     onUnload() {
         while (unpatches.length) {
