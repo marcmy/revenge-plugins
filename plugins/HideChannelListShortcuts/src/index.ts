@@ -1,6 +1,6 @@
 import { findAll } from "@vendetta/metro";
-import { i18n } from "@vendetta/metro/common";
-import { after } from "@vendetta/patcher";
+import { React, i18n } from "@vendetta/metro/common";
+import { after, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
 import settings from "./settings";
@@ -51,6 +51,8 @@ const FALLBACK_SOURCE_TOKENS = [
     "/channels/",
 ];
 
+type StringMatcher = (text: string) => boolean;
+
 const normalize = (text: string) => text.replace(/\s+/g, " ").trim().toLowerCase();
 
 const isServerBoostText = (text: string) => {
@@ -88,6 +90,54 @@ const isEventsText = (text: string) => {
         || value.includes("/events")
         || value.includes("guild-events");
 };
+
+function collectStringsDeep(value: any, out: string[] = [], depth = 0): string[] {
+    if (value == null || depth > 5) return out;
+    if (typeof value === "string") {
+        out.push(value);
+        return out;
+    }
+
+    if (Array.isArray(value)) {
+        for (const item of value) collectStringsDeep(item, out, depth + 1);
+        return out;
+    }
+
+    if (typeof value === "object") {
+        for (const key of STRING_KEYS) {
+            const raw = value[key];
+            if (typeof raw === "string") out.push(raw);
+        }
+
+        if ("children" in value) collectStringsDeep(value.children, out, depth + 1);
+        if ("props" in value) collectStringsDeep(value.props, out, depth + 1);
+    }
+
+    return out;
+}
+
+function matchesAnyText(props: any, matcher: StringMatcher): boolean {
+    const values = collectStringsDeep(props);
+    return values.some((v) => matcher(v));
+}
+
+function isPressableLike(type: any, props: any): boolean {
+    if (!props || typeof props !== "object") return false;
+    if (typeof props.onPress === "function") return true;
+    if (typeof props.onLongPress === "function") return true;
+    if (typeof props.onPressIn === "function") return true;
+
+    const typeName = String(
+        typeof type === "string"
+            ? type
+            : (type?.displayName ?? type?.name ?? "")
+    ).toLowerCase();
+
+    return typeName.includes("pressable")
+        || typeName.includes("touchable")
+        || typeName.includes("row")
+        || typeName.includes("cell");
+}
 
 function collectNodeStrings(node: any): string[] {
     const values: string[] = [];
@@ -200,11 +250,30 @@ function patchTargets() {
     }
 }
 
+function patchCreateElementFallback() {
+    if (!React?.createElement) return;
+
+    unpatches.push(instead("createElement", React, (args, orig) => {
+        const [type, props] = args as [any, any, ...any[]];
+
+        if (!props || !isPressableLike(type, props)) {
+            return orig(...args);
+        }
+
+        const hideBoosts = storage.hideServerBoosts && matchesAnyText(props, isServerBoostText);
+        const hideEvents = storage.hideEvents && matchesAnyText(props, isEventsText);
+
+        if (hideBoosts || hideEvents) return null;
+        return orig(...args);
+    }));
+}
+
 export default {
     onLoad() {
         storage.hideServerBoosts ??= true;
         storage.hideEvents ??= false;
         patchTargets();
+        patchCreateElementFallback();
     },
     onUnload() {
         while (unpatches.length) {
