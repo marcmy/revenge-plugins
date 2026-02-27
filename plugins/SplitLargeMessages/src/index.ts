@@ -4,7 +4,7 @@ import { storage } from "@vendetta/plugin";
 import { getAssetIDByName } from "@vendetta/ui/assets";
 import { showToast } from "@vendetta/ui/toasts";
 
-import settings from "./settings.js";
+import settings from "./settings";
 
 let unpatch: (() => void) | undefined;
 storage.splitOnWords ??= false;
