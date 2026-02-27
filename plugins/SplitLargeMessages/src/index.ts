@@ -57,6 +57,25 @@ export default {
         const Constants = findByProps("MAX_MESSAGE_LENGTH");
 
         const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
+        const sendChunk = async (
+            channelId: string,
+            message: { [key: string]: any },
+            content: string
+        ) => {
+            const chunkMessage = {
+                invalidEmojis: message.invalidEmojis,
+                validNonShortcutEmojis: message.validNonShortcutEmojis,
+                tts: false,
+                content,
+            };
+
+            if (typeof MessageActions._sendMessage === "function") {
+                await MessageActions._sendMessage(channelId, chunkMessage, {});
+                return;
+            }
+
+            await originalSendMessage(channelId, chunkMessage);
+        };
 
         const getMaxLength = () => UserStore.getCurrentUser()?.premiumType === 2 ? 4000 : 2000;
 
@@ -70,7 +89,7 @@ export default {
             const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
             const content = message?.content;
 
-            if (!content || content.length < getMaxLength()) return;
+            if (!content || content.length <= getMaxLength()) return;
 
             const chunks = intoChunks(content, getMaxLength());
             if (!chunks) {
@@ -79,18 +98,20 @@ export default {
                 return;
             }
 
-            message.content = chunks.shift() ?? "";
+            const nonEmptyChunks = chunks.filter(chunk => chunk.length > 0);
+            if (!nonEmptyChunks.length) {
+                message.content = "";
+                showToast("Failed to split message", getAssetIDByName("Small"));
+                return;
+            }
+
+            message.content = nonEmptyChunks.shift() ?? "";
 
             const channel = ChannelStore.getChannel(channelId);
             (async () => {
-                for (const chunk of chunks) {
+                for (const chunk of nonEmptyChunks) {
                     await sleep(Math.max((channel?.rateLimitPerUser ?? 0) * 1000, 1000));
-
-                    await originalSendMessage(channelId, {
-                        ...message,
-                        tts: false,
-                        content: chunk,
-                    });
+                    await sendChunk(channelId, message, chunk);
                 }
             })();
         });
