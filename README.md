@@ -7,3 +7,4 @@ https://marcmy.github.io/revenge-plugins/`PLUGIN_NAME`
 
 ## Plugins List:
 - SplitLargeMessages: [Install Link](https://marcmy.github.io/revenge-plugins/SplitLargeMessages/)
+- HideChannelListShortcuts: [Install Link](https://marcmy.github.io/revenge-plugins/HideChannelListShortcuts/)
