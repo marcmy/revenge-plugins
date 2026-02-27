@@ -1,1 +1,1 @@
-{"name":"SplitLargeMessages","description":"Automatically splits messages larger than 2000/4000 characters","authors":[{"name":"marcmy","id":"92076581404545024"}],"main":"index.js","vendetta":{"icon":"ic_messages"},"hash":"4b03fe03c26077a7f6c93e36eeb43e9d680f426ea816d92d6fb37baf8173f91d"}
+{"name":"SplitLargeMessages","description":"Automatically splits messages larger than 2000/4000 characters","authors":[{"name":"marcmy","id":"92076581404545024"}],"main":"index.js","vendetta":{"icon":"ic_messages"},"hash":"3bec0ab3e93431bbae2de9a883e13799c9d22ef76a679cd5cce74b8c7dbb71e0"}
