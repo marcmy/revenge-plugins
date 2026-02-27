@@ -1,4 +1,4 @@
-import { findAll } from "@vendetta/metro";
+import { findAll, findByProps } from "@vendetta/metro";
 import { React } from "@vendetta/metro/common";
 import { instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
@@ -15,6 +15,8 @@ const EVENTS_NAME_TOKENS = ["guildeventschannelrow", "eventschannelrow", "guilde
 
 const BOOST_SOURCE_TOKENS = ["SERVER_BOOSTS", "premium/subscriptions", "premium-subscriptions", "server-boost"];
 const EVENTS_SOURCE_TOKENS = ["GUILD_EVENTS", "guild-events", "/events"];
+const BOOST_COMPONENT_NAMES = ["GuildPowerupsChannelRow"];
+const EVENTS_COMPONENT_NAMES = ["GuildEventsChannelRow", "GuildEventChannelRow", "EventsChannelRow"];
 
 const normalize = (s: string) => s.toLowerCase();
 
@@ -64,6 +66,52 @@ function patchShortcutRows() {
     }
 }
 
+function getTypeName(type: any): string {
+    return String(
+        typeof type === "string"
+            ? type
+            : (type?.displayName ?? type?.name ?? "")
+    );
+}
+
+function matchesComponentName(type: any, names: string[]): boolean {
+    const typeName = getTypeName(type);
+    if (!typeName) return false;
+    return names.some((name) => typeName.includes(name));
+}
+
+function patchComponentTypeFallbacks() {
+    const jsxRuntime = findByProps("jsx", "jsxs");
+    if (jsxRuntime) {
+        for (const method of ["jsx", "jsxs"] as const) {
+            if (typeof jsxRuntime[method] !== "function") continue;
+            unpatches.push(instead(method, jsxRuntime, (args, orig) => {
+                const [type] = args as [any, ...any[]];
+                if (storage.hideServerBoosts && matchesComponentName(type, BOOST_COMPONENT_NAMES)) {
+                    return emptyRow();
+                }
+                if (storage.hideEvents && matchesComponentName(type, EVENTS_COMPONENT_NAMES)) {
+                    return emptyRow();
+                }
+                return orig(...args);
+            }));
+        }
+    }
+
+    if (React?.createElement) {
+        unpatches.push(instead("createElement", React, (args, orig) => {
+            const [type] = args as [any, ...any[]];
+            if (storage.hideServerBoosts && matchesComponentName(type, BOOST_COMPONENT_NAMES)) {
+                return emptyRow();
+            }
+            if (storage.hideEvents && matchesComponentName(type, EVENTS_COMPONENT_NAMES)) {
+                return emptyRow();
+            }
+            return orig(...args);
+        }));
+    }
+}
+
 function startRetryPatch() {
     retryTimer = setInterval(() => {
         try {
@@ -84,6 +132,7 @@ export default {
         storage.hideEvents ??= false;
 
         patchShortcutRows();
+        patchComponentTypeFallbacks();
         startRetryPatch();
     },
     onUnload() {
