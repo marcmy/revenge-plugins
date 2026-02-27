@@ -1,4 +1,4 @@
-import { findAll, findByProps } from "@vendetta/metro";
+import { findByProps } from "@vendetta/metro";
 import { React } from "@vendetta/metro/common";
 import { instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
@@ -6,65 +6,19 @@ import { storage } from "@vendetta/plugin";
 import settings from "./settings";
 
 const unpatches: Array<() => void> = [];
-const patchedFunctions = new WeakSet<Function>();
 
-let retryTimer: ReturnType<typeof setInterval> | undefined;
+const BOOST_COMPONENT_NAMES = [
+    "GuildPowerupsChannelRow",
+    "PowerupsChannelRow",
+];
 
-const BOOST_NAME_TOKENS = ["guildpowerupschannelrow", "serverboost", "powerup", "boost"];
-const EVENTS_NAME_TOKENS = ["guildeventschannelrow", "eventschannelrow", "guildevents", "event"];
-
-const BOOST_SOURCE_TOKENS = ["SERVER_BOOSTS", "premium/subscriptions", "premium-subscriptions", "server-boost"];
-const EVENTS_SOURCE_TOKENS = ["GUILD_EVENTS", "guild-events", "/events"];
-const BOOST_COMPONENT_NAMES = ["GuildPowerupsChannelRow"];
-const EVENTS_COMPONENT_NAMES = ["GuildEventsChannelRow", "GuildEventChannelRow", "EventsChannelRow"];
-
-const normalize = (s: string) => s.toLowerCase();
+const EVENTS_COMPONENT_NAMES = [
+    "GuildEventsChannelRow",
+    "GuildEventChannelRow",
+    "EventsChannelRow",
+];
 
 const emptyRow = () => React.createElement(React.Fragment, null);
-
-function methodLooksLike(name: string, fn: Function, nameTokens: string[], sourceTokens: string[]): boolean {
-    const normalizedName = normalize(name || "");
-    if (nameTokens.some((token) => normalizedName.includes(token))) return true;
-
-    const fnName = normalize(fn.displayName || fn.name || "");
-    if (nameTokens.some((token) => fnName.includes(token))) return true;
-
-    try {
-        const src = String(fn);
-        if (sourceTokens.some((token) => src.includes(token))) return true;
-    } catch { }
-
-    return false;
-}
-
-function patchMethod(moduleObj: Record<string, any>, methodName: string) {
-    const fn = moduleObj?.[methodName];
-    if (typeof fn !== "function") return;
-    if (patchedFunctions.has(fn)) return;
-
-    const isBoosts = methodLooksLike(methodName, fn, BOOST_NAME_TOKENS, BOOST_SOURCE_TOKENS);
-    const isEvents = methodLooksLike(methodName, fn, EVENTS_NAME_TOKENS, EVENTS_SOURCE_TOKENS);
-    if (!isBoosts && !isEvents) return;
-
-    patchedFunctions.add(fn);
-    unpatches.push(
-        instead(methodName, moduleObj, (args, orig) => {
-            if (isBoosts && storage.hideServerBoosts) return emptyRow();
-            if (isEvents && storage.hideEvents) return emptyRow();
-            return orig(...args);
-        })
-    );
-}
-
-function patchShortcutRows() {
-    const modules = findAll((m) => m && typeof m === "object") as Record<string, any>[];
-
-    for (const moduleObj of modules) {
-        for (const key of Object.keys(moduleObj)) {
-            patchMethod(moduleObj, key);
-        }
-    }
-}
 
 function getTypeName(type: any): string {
     return String(
@@ -80,50 +34,46 @@ function matchesComponentName(type: any, names: string[]): boolean {
     return names.some((name) => typeName.includes(name));
 }
 
-function patchComponentTypeFallbacks() {
+function shouldHideType(type: any): boolean {
+    if (storage.hideServerBoosts && matchesComponentName(type, BOOST_COMPONENT_NAMES)) return true;
+    if (storage.hideEvents && matchesComponentName(type, EVENTS_COMPONENT_NAMES)) return true;
+    return false;
+}
+
+function safeRegisterPatch(register: () => (() => void) | void) {
+    try {
+        const unpatch = register();
+        if (typeof unpatch === "function") unpatches.push(unpatch);
+    } catch { }
+}
+
+function patchJsxRuntime() {
     const jsxRuntime = findByProps("jsx", "jsxs");
-    if (jsxRuntime) {
-        for (const method of ["jsx", "jsxs"] as const) {
-            if (typeof jsxRuntime[method] !== "function") continue;
-            unpatches.push(instead(method, jsxRuntime, (args, orig) => {
+    if (!jsxRuntime) return;
+
+    for (const method of ["jsx", "jsxs"] as const) {
+        if (typeof jsxRuntime[method] !== "function") continue;
+
+        safeRegisterPatch(() =>
+            instead(method, jsxRuntime, (args, orig) => {
                 const [type] = args as [any, ...any[]];
-                if (storage.hideServerBoosts && matchesComponentName(type, BOOST_COMPONENT_NAMES)) {
-                    return emptyRow();
-                }
-                if (storage.hideEvents && matchesComponentName(type, EVENTS_COMPONENT_NAMES)) {
-                    return emptyRow();
-                }
+                if (shouldHideType(type)) return emptyRow();
                 return orig(...args);
-            }));
-        }
+            })
+        );
     }
+}
 
-    if (React?.createElement) {
-        unpatches.push(instead("createElement", React, (args, orig) => {
+function patchCreateElement() {
+    if (!React?.createElement) return;
+
+    safeRegisterPatch(() =>
+        instead("createElement", React, (args, orig) => {
             const [type] = args as [any, ...any[]];
-            if (storage.hideServerBoosts && matchesComponentName(type, BOOST_COMPONENT_NAMES)) {
-                return emptyRow();
-            }
-            if (storage.hideEvents && matchesComponentName(type, EVENTS_COMPONENT_NAMES)) {
-                return emptyRow();
-            }
+            if (shouldHideType(type)) return emptyRow();
             return orig(...args);
-        }));
-    }
-}
-
-function startRetryPatch() {
-    retryTimer = setInterval(() => {
-        try {
-            patchShortcutRows();
-        } catch { }
-    }, 3000);
-}
-
-function stopRetryPatch() {
-    if (!retryTimer) return;
-    clearInterval(retryTimer);
-    retryTimer = undefined;
+        })
+    );
 }
 
 export default {
@@ -131,13 +81,10 @@ export default {
         storage.hideServerBoosts ??= true;
         storage.hideEvents ??= false;
 
-        patchShortcutRows();
-        patchComponentTypeFallbacks();
-        startRetryPatch();
+        patchJsxRuntime();
+        patchCreateElement();
     },
     onUnload() {
-        stopRetryPatch();
-
         while (unpatches.length) {
             try {
                 unpatches.pop()?.();
