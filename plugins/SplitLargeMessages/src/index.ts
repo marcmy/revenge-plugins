@@ -21,6 +21,39 @@ let warningPatchInterval: ReturnType<typeof setInterval> | undefined;
 let draftRehydrateInterval: ReturnType<typeof setInterval> | undefined;
 storage.splitOnWords ??= false;
 
+function logDebug(...args: any[]) {
+    try {
+        console.log("[SplitLargeMessages]", ...args);
+    } catch { }
+}
+
+function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>> {
+    const targets = new Set<Record<string, any>>();
+    const addTarget = (obj: any) => {
+        if (!obj || typeof obj !== "object") return;
+
+        if (methods.some((method) => typeof obj[method] === "function")) {
+            targets.add(obj as Record<string, any>);
+        }
+
+        const proto = Object.getPrototypeOf(obj) as Record<string, any> | null;
+        if (!proto || proto === Object.prototype) return;
+        if (methods.some((method) => typeof proto[method] === "function")) {
+            targets.add(proto);
+        }
+    };
+
+    const modules = findAll((m) => m && typeof m === "object") as Array<Record<string, any>>;
+    for (const mod of modules) {
+        addTarget(mod);
+        for (const value of Object.values(mod)) {
+            addTarget(value);
+        }
+    }
+
+    return [...targets];
+}
+
 function patchMessageLengthConstants() {
     const patchTarget = (target: any) => {
         if (!target || typeof target !== "object") return;
@@ -328,6 +361,7 @@ export default {
             const nonEmptyChunks = chunks.filter(c => c.length > 0);
             if (!nonEmptyChunks.length) return false;
 
+            logDebug("Splitting oversized message", { channelId, length: content.length, chunks: nonEmptyChunks.length });
             void sendChunksSequentially(channelId, nonEmptyChunks);
             clearDraftAndUploads(channelId);
             return true;
@@ -388,9 +422,8 @@ export default {
         };
 
         const patchWarningTargets = () => {
-            const warningTargets = findAll(
-                (m) => m && typeof m === "object" && typeof m.openWarningPopout === "function"
-            ) as Array<Record<string, any>>;
+            const warningTargets = collectTargetsWithMethods(["openWarningPopout"]);
+            let patchedCount = 0;
 
             for (const target of warningTargets) {
                 if (patchedWarningTargets.has(target)) continue;
@@ -402,22 +435,16 @@ export default {
                         )
                     );
                 } catch { }
+                patchedCount++;
             }
+
+            if (patchedCount > 0) logDebug("Patched warning targets", patchedCount);
         };
         const patchPopupTargets = () => {
-            const targets: Array<Record<string, any>> = [];
+            const targets = collectTargetsWithMethods(["show", "openLazy", "openModal", "openModalLazy"]);
             if (Popup && typeof Popup === "object") targets.push(Popup as Record<string, any>);
             if (ModalManager && typeof ModalManager === "object") targets.push(ModalManager as Record<string, any>);
-            targets.push(
-                ...(findAll(
-                    (m) => m && typeof m === "object" && (
-                        typeof m.show === "function"
-                        || typeof m.openLazy === "function"
-                        || typeof m.openModal === "function"
-                        || typeof m.openModalLazy === "function"
-                    )
-                ) as Array<Record<string, any>>)
-            );
+            let patchedCount = 0;
 
             for (const target of targets) {
                 if (patchedPopupTargets.has(target)) continue;
@@ -433,16 +460,18 @@ export default {
                         );
                     } catch { }
                 }
+                patchedCount++;
             }
+
+            if (patchedCount > 0) logDebug("Patched popup targets", patchedCount);
         };
         const patchUploadTargets = () => {
-            const targets = findAll(
-                (m) => m && typeof m === "object" && typeof m.promptToUpload === "function"
-            ) as Array<Record<string, any>>;
+            const targets = collectTargetsWithMethods(["promptToUpload"]);
 
             if (UploadHandler && typeof UploadHandler === "object" && typeof UploadHandler.promptToUpload === "function") {
                 targets.push(UploadHandler as Record<string, any>);
             }
+            let patchedCount = 0;
 
             for (const target of targets) {
                 if (patchedUploadTargets.has(target)) continue;
@@ -470,7 +499,10 @@ export default {
                         })
                     );
                 } catch { }
+                patchedCount++;
             }
+
+            if (patchedCount > 0) logDebug("Patched upload targets", patchedCount);
         };
         const patchComposerTargets = () => {
             const targets = findAll(
@@ -501,7 +533,10 @@ export default {
                         })
                     );
                 } catch { }
+                patchedCount++;
             }
+
+            if (patchedCount > 0) logDebug("Patched composer targets", patchedCount);
         };
         const patchLargeDialogTargets = () => {
             const methods = [
@@ -509,11 +544,8 @@ export default {
                 "showMessageTooLongDialog",
                 "openLargeMessageDialog",
             ] as const;
-            const targets = findAll(
-                (m) => m
-                    && typeof m === "object"
-                    && methods.some((method) => typeof (m as Record<string, any>)[method] === "function")
-            ) as Array<Record<string, any>>;
+            const targets = collectTargetsWithMethods([...methods]);
+            let patchedCount = 0;
 
             for (const target of targets) {
                 if (patchedLargeDialogTargets.has(target)) continue;
@@ -539,9 +571,13 @@ export default {
                         );
                     } catch { }
                 }
+                patchedCount++;
             }
+
+            if (patchedCount > 0) logDebug("Patched large-dialog targets", patchedCount);
         };
 
+        logDebug("Plugin loaded");
         patchMessageLengthConstants();
         patchWarningTargets();
         patchPopupTargets();
