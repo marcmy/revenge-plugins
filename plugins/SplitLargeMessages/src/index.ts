@@ -96,6 +96,44 @@ function collectStringsDeep(value: any, out: string[] = [], depth = 0): string[]
     return out;
 }
 
+function extractContentFromUnknown(value: any, depth = 0): string {
+    if (depth > 4 || value == null) return "";
+    if (typeof value === "string") return value;
+    if (typeof value !== "object") return "";
+
+    const directKeys = [
+        "content",
+        "text",
+        "value",
+        "rawContent",
+        "messageContent",
+        "pendingContent",
+    ] as const;
+
+    for (const key of directKeys) {
+        const candidate = value[key];
+        if (typeof candidate === "string" && candidate.length > 0) return candidate;
+    }
+
+    const nestedKeys = [
+        "message",
+        "draft",
+        "state",
+        "editor",
+        "input",
+        "composerState",
+        "formState",
+        "richValue",
+    ] as const;
+
+    for (const key of nestedKeys) {
+        const extracted = extractContentFromUnknown(value[key], depth + 1);
+        if (extracted) return extracted;
+    }
+
+    return "";
+}
+
 function getDraftText(channelId: string, DraftStore: any): string {
     if (!DraftStore?.getDraft) return "";
 
@@ -306,8 +344,7 @@ export default {
                 ?? SelectedChannelStore?.getChannelId?.();
             if (!channelId) return orig(props);
 
-            const content = (typeof props?.content === "string" ? props.content : "")
-                || (typeof props?.text === "string" ? props.text : "")
+            const content = extractContentFromUnknown(props)
                 || getDraftText(channelId, DraftStore);
 
             if (!splitAndSendFromChannel(channelId, content)) return orig(props);
@@ -413,6 +450,22 @@ export default {
                                 return orig(files, channel, draftType);
                             }
 
+                            if (file?.text) {
+                                void file.text().then((text: string) => {
+                                    if (text && text.length > getMaxLength()) {
+                                        splitAndSendFromChannel(channelId, text);
+                                        return;
+                                    }
+
+                                    orig(files, channel, draftType);
+                                }).catch(() => {
+                                    if (!splitAndSendFromChannel(channelId)) {
+                                        orig(files, channel, draftType);
+                                    }
+                                });
+                                return undefined;
+                            }
+
                             if (!splitAndSendFromChannel(channelId)) return orig(files, channel, draftType);
 
                             return undefined;
@@ -426,7 +479,6 @@ export default {
                 (m) => m
                     && typeof m === "object"
                     && typeof m.handleSendMessage === "function"
-                    && (typeof m.onResize === "function" || typeof m.getSendMessageOptions === "function")
             ) as Array<Record<string, any>>;
 
             for (const target of targets) {
@@ -444,10 +496,7 @@ export default {
 
                             if (!channelId) return orig(...args);
 
-                            const directContent =
-                                (typeof firstArg?.content === "string" ? firstArg.content : "")
-                                || (typeof firstArg?.text === "string" ? firstArg.text : "")
-                                || (typeof firstArg?.message?.content === "string" ? firstArg.message.content : "");
+                            const directContent = extractContentFromUnknown(firstArg);
 
                             if (!splitAndSendFromChannel(channelId, directContent)) return orig(...args);
                             return undefined;
@@ -484,10 +533,7 @@ export default {
                                     ?? SelectedChannelStore?.getChannelId?.();
                                 if (!channelId) return orig(...args);
 
-                                const directContent =
-                                    (typeof firstArg?.content === "string" ? firstArg.content : "")
-                                    || (typeof firstArg?.text === "string" ? firstArg.text : "")
-                                    || (typeof firstArg?.message?.content === "string" ? firstArg.message.content : "");
+                                const directContent = extractContentFromUnknown(firstArg);
 
                                 if (!splitAndSendFromChannel(channelId, directContent)) return orig(...args);
                                 return undefined;
