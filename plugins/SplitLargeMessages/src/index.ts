@@ -12,6 +12,7 @@ const patchedLengthModules = new Map<Record<string, any>, Record<string, number>
 const warningUnpatches: Array<() => void> = [];
 const patchedWarningTargets = new WeakSet<object>();
 const patchedPopupTargets = new WeakSet<object>();
+const patchedUploadTargets = new WeakSet<object>();
 let warningPatchInterval: ReturnType<typeof setInterval> | undefined;
 storage.splitOnWords ??= false;
 
@@ -91,6 +92,14 @@ function getDraftText(channelId: string, DraftStore: any): string {
     return "";
 }
 
+function isAutoTextFile(file: any): boolean {
+    if (!file) return false;
+    const name = String(file.name ?? "");
+    const type = String(file.type ?? "");
+    if (name !== "message.txt") return false;
+    return !type || type === "text/plain";
+}
+
 function intoChunks(content: string, maxChunkLength: number): string[] | false {
     const chunks = [] as string[];
 
@@ -136,6 +145,7 @@ export default {
         const DraftStore = findByProps("getDraft");
         const DraftManager = findByProps("clearDraft", "saveDraft");
         const UploadManager = findByProps("clearAll");
+        const UploadHandler = findByProps("promptToUpload");
         const Popup = findByProps("show", "openLazy");
 
         const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
@@ -271,13 +281,63 @@ export default {
                 } catch { }
             }
         };
+        const patchUploadTargets = () => {
+            const targets = findAll(
+                (m) => m && typeof m === "object" && typeof m.promptToUpload === "function"
+            ) as Array<Record<string, any>>;
+
+            if (UploadHandler && typeof UploadHandler === "object" && typeof UploadHandler.promptToUpload === "function") {
+                targets.push(UploadHandler as Record<string, any>);
+            }
+
+            for (const target of targets) {
+                if (patchedUploadTargets.has(target)) continue;
+                patchedUploadTargets.add(target);
+
+                try {
+                    warningUnpatches.push(
+                        instead("promptToUpload", target, ([files, channel, draftType], orig) => {
+                            const file = files?.[0];
+                            const channelId = channel?.id ?? SelectedChannelStore?.getChannelId?.();
+                            const looksLikeAutoText = isAutoTextFile(file);
+                            const isChannelDraft = draftType === 0 || draftType == null;
+
+                            if (!channelId || !looksLikeAutoText || !isChannelDraft) {
+                                return orig(files, channel, draftType);
+                            }
+
+                            const content = getDraftText(channelId, DraftStore);
+                            if (!content || content.length <= getMaxLength()) {
+                                return orig(files, channel, draftType);
+                            }
+
+                            const chunks = intoChunks(content, getMaxLength());
+                            if (!chunks?.length) {
+                                return orig(files, channel, draftType);
+                            }
+
+                            void sendChunksSequentially(channelId, chunks.filter(c => c.length > 0));
+
+                            try { DraftManager?.clearDraft?.(channelId, 0); } catch { }
+                            try { DraftManager?.clearDraft?.(channelId); } catch { }
+                            try { UploadManager?.clearAll?.(channelId, 0); } catch { }
+                            try { UploadManager?.clearAll?.(channelId); } catch { }
+
+                            return undefined;
+                        })
+                    );
+                } catch { }
+            }
+        };
 
         patchMessageLengthConstants();
         patchWarningTargets();
         patchPopupTargets();
+        patchUploadTargets();
         warningPatchInterval = setInterval(() => {
             patchWarningTargets();
             patchPopupTargets();
+            patchUploadTargets();
         }, 3000);
 
         unpatch?.();
