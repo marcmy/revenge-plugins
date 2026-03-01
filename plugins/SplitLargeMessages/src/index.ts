@@ -1,4 +1,5 @@
 import { findAll, findByProps, findByStoreName } from "@vendetta/metro";
+import { i18n } from "@vendetta/metro/common";
 import { before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 import { getAssetIDByName } from "@vendetta/ui/assets";
@@ -10,6 +11,7 @@ let unpatch: (() => void) | undefined;
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
 const warningUnpatches: Array<() => void> = [];
 const patchedWarningTargets = new WeakSet<object>();
+const patchedPopupTargets = new WeakSet<object>();
 let warningPatchInterval: ReturnType<typeof setInterval> | undefined;
 storage.splitOnWords ??= false;
 
@@ -49,6 +51,28 @@ function restoreMessageLengthConstants() {
 
 function sleep(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));
+}
+
+function collectStringsDeep(value: any, out: string[] = [], depth = 0): string[] {
+    if (value == null || depth > 6) return out;
+    if (typeof value === "string") {
+        out.push(value);
+        return out;
+    }
+
+    if (Array.isArray(value)) {
+        for (const item of value) collectStringsDeep(item, out, depth + 1);
+        return out;
+    }
+
+    if (typeof value === "object") {
+        for (const [k, v] of Object.entries(value)) {
+            if (k === "onConfirm" || k === "onCancel" || k === "render" || k === "children") continue;
+            collectStringsDeep(v, out, depth + 1);
+        }
+    }
+
+    return out;
 }
 
 function getDraftText(channelId: string, DraftStore: any): string {
@@ -112,6 +136,7 @@ export default {
         const DraftStore = findByProps("getDraft");
         const DraftManager = findByProps("clearDraft", "saveDraft");
         const UploadManager = findByProps("clearAll");
+        const Popup = findByProps("show", "openLazy");
 
         const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
         const sendChunk = async (
@@ -164,6 +189,40 @@ export default {
 
             return { shouldClear: false, shouldRefocus: true };
         };
+        const handleTooLongPopup = (modalArgs: any[], orig: (...args: any[]) => any) => {
+            const modalText = collectStringsDeep(modalArgs)
+                .join(" ")
+                .replace(/\s+/g, " ")
+                .toLowerCase();
+
+            const i18nTooLong = String(i18n?.Messages?.YOUR_MESSAGE_IS_TOO_LONG ?? "").toLowerCase();
+            const looksLikeTooLongModal = (
+                modalText.includes("your message is too long")
+                || modalText.includes("up to 4000 characters")
+                || modalText.includes("2000 character count limit")
+                || (i18nTooLong && modalText.includes(i18nTooLong))
+            );
+
+            if (!looksLikeTooLongModal) return orig(...modalArgs);
+
+            const channelId = SelectedChannelStore?.getChannelId?.();
+            if (!channelId) return orig(...modalArgs);
+
+            const content = getDraftText(channelId, DraftStore);
+            if (!content || content.length <= getMaxLength()) return orig(...modalArgs);
+
+            const chunks = intoChunks(content, getMaxLength());
+            if (!chunks?.length) return orig(...modalArgs);
+
+            void sendChunksSequentially(channelId, chunks.filter(c => c.length > 0));
+
+            try { DraftManager?.clearDraft?.(channelId, 0); } catch { }
+            try { DraftManager?.clearDraft?.(channelId); } catch { }
+            try { UploadManager?.clearAll?.(channelId, 0); } catch { }
+            try { UploadManager?.clearAll?.(channelId); } catch { }
+
+            return undefined;
+        };
 
         const patchWarningTargets = () => {
             const warningTargets = findAll(
@@ -182,10 +241,44 @@ export default {
                 } catch { }
             }
         };
+        const patchPopupTargets = () => {
+            const targets: Array<Record<string, any>> = [];
+            if (Popup && typeof Popup === "object") targets.push(Popup as Record<string, any>);
+            targets.push(
+                ...(findAll(
+                    (m) => m && typeof m === "object" && (typeof m.show === "function" || typeof m.openLazy === "function")
+                ) as Array<Record<string, any>>)
+            );
+
+            for (const target of targets) {
+                if (patchedPopupTargets.has(target)) continue;
+                patchedPopupTargets.add(target);
+
+                try {
+                    if (typeof target.show === "function") {
+                        warningUnpatches.push(
+                            instead("show", target, (args, orig) => handleTooLongPopup(args as any[], orig as (...args: any[]) => any))
+                        );
+                    }
+                } catch { }
+
+                try {
+                    if (typeof target.openLazy === "function") {
+                        warningUnpatches.push(
+                            instead("openLazy", target, (args, orig) => handleTooLongPopup(args as any[], orig as (...args: any[]) => any))
+                        );
+                    }
+                } catch { }
+            }
+        };
 
         patchMessageLengthConstants();
         patchWarningTargets();
-        warningPatchInterval = setInterval(patchWarningTargets, 3000);
+        patchPopupTargets();
+        warningPatchInterval = setInterval(() => {
+            patchWarningTargets();
+            patchPopupTargets();
+        }, 3000);
 
         unpatch?.();
         unpatch = before("sendMessage", MessageActions, args => {
