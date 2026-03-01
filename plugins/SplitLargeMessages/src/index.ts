@@ -1,4 +1,4 @@
-import { findByProps, findByStoreName } from "@vendetta/metro";
+import { findAll, findByProps, findByStoreName } from "@vendetta/metro";
 import { before } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 import { getAssetIDByName } from "@vendetta/ui/assets";
@@ -7,7 +7,42 @@ import { showToast } from "@vendetta/ui/toasts";
 import settings from "./settings";
 
 let unpatch: (() => void) | undefined;
+const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
 storage.splitOnWords ??= false;
+
+function patchMessageLengthConstants() {
+    patchedLengthModules.clear();
+
+    const modules = findAll((m) =>
+        m && typeof m === "object" && Object.keys(m).some((key) => key.includes("MAX_MESSAGE_LENGTH"))
+    ) as Array<Record<string, any>>;
+
+    for (const mod of modules) {
+        const previousValues: Record<string, number> = {};
+        let touched = false;
+
+        for (const key of Object.keys(mod)) {
+            if (!key.includes("MAX_MESSAGE_LENGTH")) continue;
+            if (typeof mod[key] !== "number") continue;
+
+            previousValues[key] = mod[key];
+            mod[key] = 2 ** 30;
+            touched = true;
+        }
+
+        if (touched) patchedLengthModules.set(mod, previousValues);
+    }
+}
+
+function restoreMessageLengthConstants() {
+    for (const [mod, values] of patchedLengthModules) {
+        for (const [key, value] of Object.entries(values)) {
+            mod[key] = value;
+        }
+    }
+
+    patchedLengthModules.clear();
+}
 
 function sleep(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));
@@ -54,7 +89,6 @@ export default {
         const ChannelStore = findByStoreName("ChannelStore");
         const UserStore = findByStoreName("UserStore");
         const MessageActions = findByProps("sendMessage", "editMessage");
-        const Constants = findByProps("MAX_MESSAGE_LENGTH");
 
         const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
         const sendChunk = async (
@@ -79,10 +113,7 @@ export default {
 
         const getMaxLength = () => UserStore.getCurrentUser()?.premiumType === 2 ? 4000 : 2000;
 
-        if (Constants) {
-            Constants.MAX_MESSAGE_LENGTH = 2 ** 30;
-            Constants.MAX_MESSAGE_LENGTH_PREMIUM = 2 ** 30;
-        }
+        patchMessageLengthConstants();
 
         unpatch?.();
         unpatch = before("sendMessage", MessageActions, args => {
@@ -120,11 +151,7 @@ export default {
         unpatch?.();
         unpatch = undefined;
 
-        const Constants = findByProps("MAX_MESSAGE_LENGTH");
-        if (Constants) {
-            Constants.MAX_MESSAGE_LENGTH = 2000;
-            Constants.MAX_MESSAGE_LENGTH_PREMIUM = 4000;
-        }
+        restoreMessageLengthConstants();
     },
     settings,
 };
