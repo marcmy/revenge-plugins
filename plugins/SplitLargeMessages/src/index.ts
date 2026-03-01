@@ -10,9 +10,10 @@ import settings from "./settings";
 let unpatch: (() => void) | undefined;
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
 const warningUnpatches: Array<() => void> = [];
-const patchedWarningTargets = new WeakSet<object>();
-const patchedPopupTargets = new WeakSet<object>();
-const patchedUploadTargets = new WeakSet<object>();
+const patchedWarningTargets = new Set<object>();
+const patchedPopupTargets = new Set<object>();
+const patchedUploadTargets = new Set<object>();
+const patchedComposerTargets = new Set<object>();
 let warningPatchInterval: ReturnType<typeof setInterval> | undefined;
 storage.splitOnWords ??= false;
 
@@ -175,6 +176,26 @@ export default {
                 await sendChunk(channelId, {}, content);
             }
         };
+        const clearDraftAndUploads = (channelId: string) => {
+            try { DraftManager?.clearDraft?.(channelId, 0); } catch { }
+            try { DraftManager?.clearDraft?.(channelId); } catch { }
+            try { UploadManager?.clearAll?.(channelId, 0); } catch { }
+            try { UploadManager?.clearAll?.(channelId); } catch { }
+        };
+        const splitAndSend = (channelId: string, rawContent?: string) => {
+            const content = (typeof rawContent === "string" ? rawContent : "") || getDraftText(channelId, DraftStore);
+            if (!content || content.length <= getMaxLength()) return false;
+
+            const chunks = intoChunks(content, getMaxLength());
+            if (!chunks?.length) return false;
+
+            const nonEmptyChunks = chunks.filter(c => c.length > 0);
+            if (!nonEmptyChunks.length) return false;
+
+            void sendChunksSequentially(channelId, nonEmptyChunks);
+            clearDraftAndUploads(channelId);
+            return true;
+        };
         const handleTooLongWarning = (props: any, orig: (props: any) => any) => {
             const channelId = props?.channel?.id
                 ?? props?.channelId
@@ -185,17 +206,7 @@ export default {
                 || (typeof props?.text === "string" ? props.text : "")
                 || getDraftText(channelId, DraftStore);
 
-            if (!content || content.length <= getMaxLength()) return orig(props);
-
-            const chunks = intoChunks(content, getMaxLength());
-            if (!chunks?.length) return orig(props);
-
-            void sendChunksSequentially(channelId, chunks.filter(c => c.length > 0));
-
-            try { DraftManager?.clearDraft?.(channelId, 0); } catch { }
-            try { DraftManager?.clearDraft?.(channelId); } catch { }
-            try { UploadManager?.clearAll?.(channelId, 0); } catch { }
-            try { UploadManager?.clearAll?.(channelId); } catch { }
+            if (!splitAndSend(channelId, content)) return orig(props);
 
             return { shouldClear: false, shouldRefocus: true };
         };
@@ -218,18 +229,7 @@ export default {
             const channelId = SelectedChannelStore?.getChannelId?.();
             if (!channelId) return orig(...modalArgs);
 
-            const content = getDraftText(channelId, DraftStore);
-            if (!content || content.length <= getMaxLength()) return orig(...modalArgs);
-
-            const chunks = intoChunks(content, getMaxLength());
-            if (!chunks?.length) return orig(...modalArgs);
-
-            void sendChunksSequentially(channelId, chunks.filter(c => c.length > 0));
-
-            try { DraftManager?.clearDraft?.(channelId, 0); } catch { }
-            try { DraftManager?.clearDraft?.(channelId); } catch { }
-            try { UploadManager?.clearAll?.(channelId, 0); } catch { }
-            try { UploadManager?.clearAll?.(channelId); } catch { }
+            if (!splitAndSend(channelId)) return orig(...modalArgs);
 
             return undefined;
         };
@@ -306,23 +306,43 @@ export default {
                                 return orig(files, channel, draftType);
                             }
 
-                            const content = getDraftText(channelId, DraftStore);
-                            if (!content || content.length <= getMaxLength()) {
-                                return orig(files, channel, draftType);
-                            }
+                            if (!splitAndSend(channelId)) return orig(files, channel, draftType);
 
-                            const chunks = intoChunks(content, getMaxLength());
-                            if (!chunks?.length) {
-                                return orig(files, channel, draftType);
-                            }
+                            return undefined;
+                        })
+                    );
+                } catch { }
+            }
+        };
+        const patchComposerTargets = () => {
+            const targets = findAll(
+                (m) => m
+                    && typeof m === "object"
+                    && typeof m.handleSendMessage === "function"
+                    && (typeof m.onResize === "function" || typeof m.getSendMessageOptions === "function")
+            ) as Array<Record<string, any>>;
 
-                            void sendChunksSequentially(channelId, chunks.filter(c => c.length > 0));
+            for (const target of targets) {
+                if (patchedComposerTargets.has(target)) continue;
+                patchedComposerTargets.add(target);
 
-                            try { DraftManager?.clearDraft?.(channelId, 0); } catch { }
-                            try { DraftManager?.clearDraft?.(channelId); } catch { }
-                            try { UploadManager?.clearAll?.(channelId, 0); } catch { }
-                            try { UploadManager?.clearAll?.(channelId); } catch { }
+                try {
+                    warningUnpatches.push(
+                        instead("handleSendMessage", target, (args, orig) => {
+                            const [firstArg] = args as [Record<string, any> | undefined];
+                            const channelId = firstArg?.channel?.id
+                                ?? firstArg?.channelId
+                                ?? firstArg?.id
+                                ?? SelectedChannelStore?.getChannelId?.();
 
+                            if (!channelId) return orig(...args);
+
+                            const directContent =
+                                (typeof firstArg?.content === "string" ? firstArg.content : "")
+                                || (typeof firstArg?.text === "string" ? firstArg.text : "")
+                                || (typeof firstArg?.message?.content === "string" ? firstArg.message.content : "");
+
+                            if (!splitAndSend(channelId, directContent)) return orig(...args);
                             return undefined;
                         })
                     );
@@ -334,10 +354,12 @@ export default {
         patchWarningTargets();
         patchPopupTargets();
         patchUploadTargets();
+        patchComposerTargets();
         warningPatchInterval = setInterval(() => {
             patchWarningTargets();
             patchPopupTargets();
             patchUploadTargets();
+            patchComposerTargets();
         }, 3000);
 
         unpatch?.();
@@ -384,6 +406,10 @@ export default {
                 warningUnpatches.pop()?.();
             } catch { }
         }
+        patchedWarningTargets.clear();
+        patchedPopupTargets.clear();
+        patchedUploadTargets.clear();
+        patchedComposerTargets.clear();
 
         restoreMessageLengthConstants();
     },
