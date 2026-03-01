@@ -1,5 +1,5 @@
 import { findAll, findByProps, findByStoreName } from "@vendetta/metro";
-import { before } from "@vendetta/patcher";
+import { before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 import { getAssetIDByName } from "@vendetta/ui/assets";
 import { showToast } from "@vendetta/ui/toasts";
@@ -8,6 +8,9 @@ import settings from "./settings";
 
 let unpatch: (() => void) | undefined;
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
+const warningUnpatches: Array<() => void> = [];
+const patchedWarningTargets = new WeakSet<object>();
+let warningPatchInterval: ReturnType<typeof setInterval> | undefined;
 storage.splitOnWords ??= false;
 
 function patchMessageLengthConstants() {
@@ -46,6 +49,22 @@ function restoreMessageLengthConstants() {
 
 function sleep(ms: number): Promise<void> {
     return new Promise(r => setTimeout(r, ms));
+}
+
+function getDraftText(channelId: string, DraftStore: any): string {
+    if (!DraftStore?.getDraft) return "";
+
+    try {
+        const byType = DraftStore.getDraft(channelId, 0);
+        if (typeof byType === "string") return byType;
+    } catch { }
+
+    try {
+        const basic = DraftStore.getDraft(channelId);
+        if (typeof basic === "string") return basic;
+    } catch { }
+
+    return "";
 }
 
 function intoChunks(content: string, maxChunkLength: number): string[] | false {
@@ -87,8 +106,12 @@ function intoChunks(content: string, maxChunkLength: number): string[] | false {
 export default {
     onLoad() {
         const ChannelStore = findByStoreName("ChannelStore");
+        const SelectedChannelStore = findByStoreName("SelectedChannelStore");
         const UserStore = findByStoreName("UserStore");
         const MessageActions = findByProps("sendMessage", "editMessage");
+        const DraftStore = findByProps("getDraft");
+        const DraftManager = findByProps("clearDraft", "saveDraft");
+        const UploadManager = findByProps("clearAll");
 
         const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
         const sendChunk = async (
@@ -112,8 +135,57 @@ export default {
         };
 
         const getMaxLength = () => UserStore.getCurrentUser()?.premiumType === 2 ? 4000 : 2000;
+        const sendChunksSequentially = async (channelId: string, chunks: string[]) => {
+            for (const content of chunks) {
+                await sendChunk(channelId, {}, content);
+            }
+        };
+        const handleTooLongWarning = (props: any, orig: (props: any) => any) => {
+            const channelId = props?.channel?.id
+                ?? props?.channelId
+                ?? SelectedChannelStore?.getChannelId?.();
+            if (!channelId) return orig(props);
+
+            const content = (typeof props?.content === "string" ? props.content : "")
+                || (typeof props?.text === "string" ? props.text : "")
+                || getDraftText(channelId, DraftStore);
+
+            if (!content || content.length <= getMaxLength()) return orig(props);
+
+            const chunks = intoChunks(content, getMaxLength());
+            if (!chunks?.length) return orig(props);
+
+            void sendChunksSequentially(channelId, chunks.filter(c => c.length > 0));
+
+            try { DraftManager?.clearDraft?.(channelId, 0); } catch { }
+            try { DraftManager?.clearDraft?.(channelId); } catch { }
+            try { UploadManager?.clearAll?.(channelId, 0); } catch { }
+            try { UploadManager?.clearAll?.(channelId); } catch { }
+
+            return { shouldClear: false, shouldRefocus: true };
+        };
+
+        const patchWarningTargets = () => {
+            const warningTargets = findAll(
+                (m) => m && typeof m === "object" && typeof m.openWarningPopout === "function"
+            ) as Array<Record<string, any>>;
+
+            for (const target of warningTargets) {
+                if (patchedWarningTargets.has(target)) continue;
+                patchedWarningTargets.add(target);
+                try {
+                    warningUnpatches.push(
+                        instead("openWarningPopout", target, ([props], orig) =>
+                            handleTooLongWarning(props, orig as (props: any) => any)
+                        )
+                    );
+                } catch { }
+            }
+        };
 
         patchMessageLengthConstants();
+        patchWarningTargets();
+        warningPatchInterval = setInterval(patchWarningTargets, 3000);
 
         unpatch?.();
         unpatch = before("sendMessage", MessageActions, args => {
@@ -150,6 +222,15 @@ export default {
     onUnload: () => {
         unpatch?.();
         unpatch = undefined;
+        if (warningPatchInterval) {
+            clearInterval(warningPatchInterval);
+            warningPatchInterval = undefined;
+        }
+        while (warningUnpatches.length) {
+            try {
+                warningUnpatches.pop()?.();
+            } catch { }
+        }
 
         restoreMessageLengthConstants();
     },
