@@ -338,6 +338,16 @@ export default {
             if (splitAndSend(channelId)) return true;
             return false;
         };
+        const splitAndSendFromAutoTextFile = (channelId: string, file: any) => {
+            if (!file?.text || !isAutoTextFile(file)) return false;
+
+            void file.text().then((text: string) => {
+                if (!text || text.length <= getMaxLength()) return;
+                splitAndSendFromChannel(channelId, text);
+            }).catch(() => { });
+
+            return true;
+        };
         const handleTooLongWarning = (props: any, orig: (props: any) => any) => {
             const channelId = props?.channel?.id
                 ?? props?.channelId
@@ -450,19 +460,7 @@ export default {
                                 return orig(files, channel, draftType);
                             }
 
-                            if (file?.text) {
-                                void file.text().then((text: string) => {
-                                    if (text && text.length > getMaxLength()) {
-                                        splitAndSendFromChannel(channelId, text);
-                                        return;
-                                    }
-
-                                    orig(files, channel, draftType);
-                                }).catch(() => {
-                                    if (!splitAndSendFromChannel(channelId)) {
-                                        orig(files, channel, draftType);
-                                    }
-                                });
+                            if (splitAndSendFromAutoTextFile(channelId, file)) {
                                 return undefined;
                             }
 
