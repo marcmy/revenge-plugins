@@ -61,6 +61,12 @@ function collectStringsDeep(value: any, out: string[] = [], depth = 0): string[]
         out.push(value);
         return out;
     }
+    if (typeof value === "function") {
+        try {
+            out.push(Function.prototype.toString.call(value));
+        } catch { }
+        return out;
+    }
 
     if (Array.isArray(value)) {
         for (const item of value) collectStringsDeep(item, out, depth + 1);
@@ -148,6 +154,7 @@ export default {
         const UploadManager = findByProps("clearAll");
         const UploadHandler = findByProps("promptToUpload");
         const Popup = findByProps("show", "openLazy");
+        const ModalManager = findByProps("openModal", "openModalLazy");
 
         const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
         const sendChunk = async (
@@ -192,6 +199,12 @@ export default {
             const nonEmptyChunks = chunks.filter(c => c.length > 0);
             if (!nonEmptyChunks.length) return false;
 
+            console.log("[SplitLargeMessages] splitting long message", {
+                channelId,
+                length: content.length,
+                maxLength: getMaxLength(),
+                chunks: nonEmptyChunks.length,
+            });
             void sendChunksSequentially(channelId, nonEmptyChunks);
             clearDraftAndUploads(channelId);
             return true;
@@ -221,6 +234,8 @@ export default {
                 modalText.includes("your message is too long")
                 || modalText.includes("up to 4000 characters")
                 || modalText.includes("2000 character count limit")
+                || modalText.includes("your_message_is_too_long")
+                || modalText.includes("showlargemessagedialog")
                 || (i18nTooLong && modalText.includes(i18nTooLong))
             );
 
@@ -254,9 +269,15 @@ export default {
         const patchPopupTargets = () => {
             const targets: Array<Record<string, any>> = [];
             if (Popup && typeof Popup === "object") targets.push(Popup as Record<string, any>);
+            if (ModalManager && typeof ModalManager === "object") targets.push(ModalManager as Record<string, any>);
             targets.push(
                 ...(findAll(
-                    (m) => m && typeof m === "object" && (typeof m.show === "function" || typeof m.openLazy === "function")
+                    (m) => m && typeof m === "object" && (
+                        typeof m.show === "function"
+                        || typeof m.openLazy === "function"
+                        || typeof m.openModal === "function"
+                        || typeof m.openModalLazy === "function"
+                    )
                 ) as Array<Record<string, any>>)
             );
 
@@ -264,21 +285,16 @@ export default {
                 if (patchedPopupTargets.has(target)) continue;
                 patchedPopupTargets.add(target);
 
-                try {
-                    if (typeof target.show === "function") {
+                for (const method of ["show", "openLazy", "openModal", "openModalLazy"] as const) {
+                    try {
+                        if (typeof target[method] !== "function") continue;
                         warningUnpatches.push(
-                            instead("show", target, (args, orig) => handleTooLongPopup(args as any[], orig as (...args: any[]) => any))
+                            instead(method, target, (args, orig) =>
+                                handleTooLongPopup(args as any[], orig as (...args: any[]) => any)
+                            )
                         );
-                    }
-                } catch { }
-
-                try {
-                    if (typeof target.openLazy === "function") {
-                        warningUnpatches.push(
-                            instead("openLazy", target, (args, orig) => handleTooLongPopup(args as any[], orig as (...args: any[]) => any))
-                        );
-                    }
-                } catch { }
+                    } catch { }
+                }
             }
         };
         const patchUploadTargets = () => {
