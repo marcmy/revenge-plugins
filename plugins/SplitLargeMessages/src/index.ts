@@ -16,10 +16,9 @@ const patchedPopupTargets = new Set<object>();
 const patchedUploadTargets = new Set<object>();
 const patchedComposerTargets = new Set<object>();
 const patchedLargeDialogTargets = new Set<object>();
-const patchedGuardTargets = new Map<object, Set<string>>();
 const rehydratingDraftChannels = new Set<string>();
-let warningPatchInterval: ReturnType<typeof setInterval> | undefined;
 let draftRehydrateInterval: ReturnType<typeof setInterval> | undefined;
+const patchRetryTimeouts: Array<ReturnType<typeof setTimeout>> = [];
 storage.splitOnWords ??= false;
 
 function logDebug(...args: any[]) {
@@ -34,14 +33,6 @@ function safeObjectValues(value: any): any[] {
   } catch {
     return [];
   }
-}
-
-function markPatchedGuard(target: object, key: string): boolean {
-  const patched = patchedGuardTargets.get(target) ?? new Set<string>();
-  if (patched.has(key)) return false;
-  patched.add(key);
-  patchedGuardTargets.set(target, patched);
-  return true;
 }
 
 function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>> {
@@ -690,96 +681,21 @@ export default {
 
       if (patchedCount > 0) logDebug("Patched large-dialog targets", patchedCount);
     };
-    const patchTooLongGuardTargets = () => {
-      const sourceHints = [
-        "YOUR_MESSAGE_IS_TOO_LONG",
-        "showLargeMessageDialog",
-        "showMessageTooLongDialog",
-        "openLargeMessageDialog",
-        "message is too long",
-        "2000 character",
-        "4000 character",
-        "MAX_MESSAGE_LENGTH",
-        "MESSAGE_LENGTH",
-      ] as const;
-
-      let patchedCount = 0;
-      const modules = findAll((m) => m && typeof m === "object") as Array<Record<string, any>>;
-      const tryPatchTarget = (target: Record<string, any>) => {
-        let descriptors: Record<string, PropertyDescriptor>;
-        try {
-          descriptors = Object.getOwnPropertyDescriptors(target);
-        } catch {
-          return;
-        }
-
-        for (const [key, descriptor] of Object.entries(descriptors)) {
-          if (!("value" in descriptor) || typeof descriptor.value !== "function") continue;
-          const value = descriptor.value;
-          if (!markPatchedGuard(target, key)) continue;
-
-          let source = "";
-          try {
-            source = Function.prototype.toString.call(value);
-          } catch {}
-
-          if (!source) continue;
-          if (!sourceHints.some((hint) => source.includes(hint))) continue;
-
-          try {
-            warningUnpatches.push(
-              instead(key, target, (args, orig) => {
-                const firstArg = (args as any[])?.[0];
-                const channelId = resolveChannelId(firstArg);
-                const content = extractContentFromUnknown(firstArg) || getLongestStringDeep(args);
-
-                if (channelId && content && content.length > getMaxLength()) {
-                  if (splitAndSendFromChannel(channelId, content)) return undefined;
-                }
-
-                const result = (orig as (...callArgs: any[]) => any)(...(args as any[]));
-                if (typeof result === "boolean" && content && content.length > getMaxLength()) {
-                  return false;
-                }
-
-                return result;
-              }),
-            );
-            patchedCount++;
-          } catch {}
-        }
-      };
-
-      for (const mod of modules) {
-        tryPatchTarget(mod);
-        for (const nested of safeObjectValues(mod)) {
-          if (!nested || typeof nested !== "object") continue;
-          tryPatchTarget(nested as Record<string, any>);
-        }
-      }
-
-      if (patchedCount > 0) logDebug("Patched guard-source targets", patchedCount);
-    };
-
-    logDebug("Plugin loaded");
-    patchMessageLengthConstants();
-    patchWarningTargets();
-    patchPopupTargets();
-    patchUploadTargets();
-    patchComposerTargets();
-    patchLargeDialogTargets();
-    patchTooLongGuardTargets();
-    pollDraftRehydrate();
-    draftRehydrateInterval = setInterval(pollDraftRehydrate, 250);
-    warningPatchInterval = setInterval(() => {
+    const runPatchSweep = () => {
       patchMessageLengthConstants();
       patchWarningTargets();
       patchPopupTargets();
       patchUploadTargets();
       patchComposerTargets();
       patchLargeDialogTargets();
-      patchTooLongGuardTargets();
-    }, 3000);
+    };
+
+    logDebug("Plugin loaded");
+    runPatchSweep();
+    patchRetryTimeouts.push(setTimeout(runPatchSweep, 3000));
+    patchRetryTimeouts.push(setTimeout(runPatchSweep, 10000));
+    pollDraftRehydrate();
+    draftRehydrateInterval = setInterval(pollDraftRehydrate, 1000);
 
     unpatch?.();
     unpatchRawSend?.();
@@ -897,9 +813,10 @@ export default {
     unpatch = undefined;
     unpatchRawSend?.();
     unpatchRawSend = undefined;
-    if (warningPatchInterval) {
-      clearInterval(warningPatchInterval);
-      warningPatchInterval = undefined;
+    while (patchRetryTimeouts.length) {
+      const timeout = patchRetryTimeouts.pop();
+      if (!timeout) continue;
+      clearTimeout(timeout);
     }
     if (draftRehydrateInterval) {
       clearInterval(draftRehydrateInterval);
@@ -915,7 +832,6 @@ export default {
     patchedUploadTargets.clear();
     patchedComposerTargets.clear();
     patchedLargeDialogTargets.clear();
-    patchedGuardTargets.clear();
     rehydratingDraftChannels.clear();
 
     restoreMessageLengthConstants();
