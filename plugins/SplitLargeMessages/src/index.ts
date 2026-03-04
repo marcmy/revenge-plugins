@@ -316,6 +316,18 @@ export default {
     };
 
     const getMaxLength = () => (UserStore.getCurrentUser()?.premiumType === 2 ? 4000 : 2000);
+    const resolveChannelId = (...values: any[]) => {
+      for (const value of values) {
+        if (!value) continue;
+        if (typeof value === "string") return value;
+        if (typeof value !== "object") continue;
+        const direct = value.channelId ?? value.id;
+        if (typeof direct === "string" && direct.length > 0) return direct;
+        const nested = value.channel?.id;
+        if (typeof nested === "string" && nested.length > 0) return nested;
+      }
+      return SelectedChannelStore?.getChannelId?.();
+    };
     const sendChunksSequentially = async (channelId: string, chunks: string[]) => {
       for (const content of chunks) {
         await sendChunk(channelId, {}, content);
@@ -675,7 +687,21 @@ export default {
     unpatch?.();
     unpatchRawSend?.();
     unpatch = instead("sendMessage", MessageActions, (args, orig) => {
-      const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
+      const sendArgs = args as any[];
+      const firstArg = sendArgs[0];
+      const secondArg = sendArgs[1];
+      const message =
+        secondArg && typeof secondArg === "object"
+          ? secondArg
+          : firstArg && typeof firstArg === "object"
+            ? firstArg
+            : ({} as { content?: string; [key: string]: any });
+      const channelId = resolveChannelId(firstArg, secondArg, message);
+
+      if (!channelId) {
+        return (orig as (...callArgs: any[]) => any)(...sendArgs);
+      }
+
       const content = extractContentFromUnknown(message) || getLongestStringDeep(message);
 
       if (splitAndSendFromChannel(channelId, content)) {
@@ -683,7 +709,7 @@ export default {
       }
 
       if (!content || content.length <= getMaxLength()) {
-        return (orig as (channelId: string, message: Record<string, any>) => any)(channelId, message);
+        return (orig as (...callArgs: any[]) => any)(...sendArgs);
       }
 
       const chunks = intoChunks(content, getMaxLength());
@@ -704,9 +730,19 @@ export default {
         content: firstChunk,
       };
 
+      const firstChunkArgs = [...sendArgs];
+      if (typeof firstChunkArgs[0] === "string") {
+        firstChunkArgs[0] = channelId;
+        firstChunkArgs[1] = firstMessage;
+      } else if (firstChunkArgs[1] && typeof firstChunkArgs[1] === "object") {
+        firstChunkArgs[1] = firstMessage;
+      } else {
+        firstChunkArgs[0] = firstMessage;
+      }
+
       const channel = ChannelStore.getChannel(channelId);
       void (async () => {
-        await originalSendMessage(channelId, firstMessage);
+        await (orig as (...callArgs: any[]) => any)(...firstChunkArgs);
         for (const chunk of nonEmptyChunks) {
           await sleep(Math.max((channel?.rateLimitPerUser ?? 0) * 1000, 1000));
           await sendChunk(channelId, message, chunk);
@@ -717,7 +753,18 @@ export default {
     });
     if (typeof MessageActions._sendMessage === "function") {
       unpatchRawSend = before("_sendMessage", MessageActions, (args) => {
-        const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
+        const rawArgs = args as any[];
+        const firstArg = rawArgs[0];
+        const secondArg = rawArgs[1];
+        const message =
+          secondArg && typeof secondArg === "object"
+            ? secondArg
+            : firstArg && typeof firstArg === "object"
+              ? firstArg
+              : ({} as { content?: string; [key: string]: any });
+        const channelId = resolveChannelId(firstArg, secondArg, message);
+        if (!channelId) return;
+
         const content = extractContentFromUnknown(message) || getLongestStringDeep(message);
 
         if (!content || content.length <= getMaxLength()) return;
