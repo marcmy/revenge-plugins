@@ -15,6 +15,12 @@ export default () => {
                 onValueChange={(v) => storage.splitOnWords = v}
                 value={storage.splitOnWords}
             />
+            <Forms.FormSwitchRow
+                label="Fix plain pasted lists"
+                subLabel="Tries to restore markdown bullets for plain ChatGPT-style list blocks"
+                onValueChange={(v) => storage.fixPlainLists = v}
+                value={storage.fixPlainLists}
+            />
         </ReactNative.ScrollView>
     </ErrorBoundary>
     );

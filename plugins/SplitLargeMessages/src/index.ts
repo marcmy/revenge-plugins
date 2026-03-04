@@ -22,6 +22,7 @@ const rehydratingDraftChannels = new Set<string>();
 let draftRehydrateInterval: ReturnType<typeof setInterval> | undefined;
 const patchRetryTimeouts: Array<ReturnType<typeof setTimeout>> = [];
 storage.splitOnWords ??= false;
+storage.fixPlainLists ??= false;
 
 function logDebug(...args: any[]) {
   try {
@@ -331,6 +332,55 @@ function intoChunks(content: string, maxChunkLength: number): string[] | false {
   return chunks;
 }
 
+function normalizePlainListMarkdown(content: string): string {
+  if (!storage.fixPlainLists) return content;
+
+  const lines = content.split("\n");
+  let inFence = false;
+  const isAlreadyList = (line: string) => /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line);
+  const isCandidateItem = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (trimmed.length > 100) return false;
+    if (isAlreadyList(trimmed)) return false;
+    return true;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.includes("```")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (!/:\s*$/.test(line)) continue;
+
+    let start = i + 1;
+    while (start < lines.length && lines[start].trim() === "") start++;
+    let end = start;
+
+    while (end < lines.length) {
+      const current = lines[end];
+      if (current.includes("```")) break;
+      if (current.trim() === "") break;
+      end++;
+    }
+
+    if (end - start < 2) continue;
+    const block = lines.slice(start, end);
+    if (!block.every(isCandidateItem)) continue;
+
+    for (let j = start; j < end; j++) {
+      const indent = lines[j].match(/^\s*/)?.[0] ?? "";
+      lines[j] = `${indent}- ${lines[j].trimStart()}`;
+    }
+
+    i = end - 1;
+  }
+
+  return lines.join("\n");
+}
+
 export default {
   onLoad() {
     try {
@@ -495,7 +545,8 @@ export default {
       rehydrateDraftFromAutoTextUpload(channelId);
     };
     const splitAndSend = (channelId: string, rawContent?: string) => {
-      const content = (typeof rawContent === "string" ? rawContent : "") || getDraftText(channelId, DraftStore);
+      const originalContent = (typeof rawContent === "string" ? rawContent : "") || getDraftText(channelId, DraftStore);
+      const content = normalizePlainListMarkdown(originalContent);
       if (!content || content.length <= getMaxLength()) return false;
 
       const chunks = intoChunks(content, getMaxLength());
