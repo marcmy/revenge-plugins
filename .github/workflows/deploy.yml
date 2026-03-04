@@ -41,6 +41,49 @@ jobs:
       - name: Copy additional files
         run: |
           cp README.md dist/README.md
+          node <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+
+          const distDir = "dist";
+          const pluginDirs = fs.readdirSync(distDir, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => entry.name)
+            .sort((a, b) => a.localeCompare(b));
+
+          const items = pluginDirs.map((dir) => {
+            const manifestPath = path.join(distDir, dir, "manifest.json");
+            let name = dir;
+            try {
+              const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+              if (manifest && typeof manifest.name === "string" && manifest.name.trim()) {
+                name = manifest.name.trim();
+              }
+            } catch {}
+
+            return `<li><a href="./${dir}/">${name}</a></li>`;
+          }).join("\n");
+
+          const html = `<!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Revenge Plugins</title>
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; line-height: 1.5; }
+            </style>
+          </head>
+          <body>
+            <h1>Revenge Plugins</h1>
+            <ul>
+          ${items}
+            </ul>
+          </body>
+          </html>`;
+
+          fs.writeFileSync(path.join(distDir, "index.html"), html);
+          NODE
           cat > dist/404.html <<'HTML'
           <!doctype html>
           <html lang="en">

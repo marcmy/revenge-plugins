@@ -108,13 +108,14 @@ function patchMessageLengthConstants() {
     const mod = target as Record<string, any>;
     const previousValues = patchedLengthModules.get(mod) ?? {};
     let touched = false;
+    const descriptors = Object.getOwnPropertyDescriptors(mod);
 
-    for (const key of Object.keys(mod)) {
+    for (const [key, descriptor] of Object.entries(descriptors)) {
       if (!key.includes("MESSAGE_LENGTH")) continue;
-      if (typeof mod[key] !== "number") continue;
+      if (!("value" in descriptor) || typeof descriptor.value !== "number") continue;
 
       if (!(key in previousValues)) {
-        previousValues[key] = mod[key];
+        previousValues[key] = descriptor.value;
       }
       mod[key] = 2 ** 30;
       touched = true;
@@ -122,9 +123,13 @@ function patchMessageLengthConstants() {
 
     if (touched) patchedLengthModules.set(mod, previousValues);
   };
-  const modules = findAll(
-    (m) => m && typeof m === "object" && Object.keys(m).some((key) => key.includes("MESSAGE_LENGTH")),
-  ) as Array<Record<string, any>>;
+  const modules = findAll((m) => {
+    try {
+      return m && typeof m === "object" && Object.keys(m).some((key) => key.includes("MESSAGE_LENGTH"));
+    } catch {
+      return false;
+    }
+  }) as Array<Record<string, any>>;
 
   for (const mod of modules) {
     patchTarget(mod);
@@ -701,8 +706,16 @@ export default {
       let patchedCount = 0;
       const modules = findAll((m) => m && typeof m === "object") as Array<Record<string, any>>;
       const tryPatchTarget = (target: Record<string, any>) => {
-        for (const [key, value] of Object.entries(target)) {
-          if (typeof value !== "function") continue;
+        let descriptors: Record<string, PropertyDescriptor>;
+        try {
+          descriptors = Object.getOwnPropertyDescriptors(target);
+        } catch {
+          return;
+        }
+
+        for (const [key, descriptor] of Object.entries(descriptors)) {
+          if (!("value" in descriptor) || typeof descriptor.value !== "function") continue;
+          const value = descriptor.value;
           if (!markPatchedGuard(target, key)) continue;
 
           let source = "";
