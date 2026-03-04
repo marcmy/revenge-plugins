@@ -1,4 +1,5 @@
 import { findByProps } from "@vendetta/metro";
+import { React } from "@vendetta/metro/common";
 import { before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
@@ -15,6 +16,7 @@ let clipboardPollInterval: ReturnType<typeof setInterval> | undefined;
 
 storage.recoverInDraft ??= true;
 storage.recoverOnSend ??= true;
+storage.recoverInComposer ??= true;
 storage.recoveryWindowMs ??= 180000;
 
 function now() {
@@ -90,6 +92,59 @@ function findTextArgIndex(args: any[]): number {
         fallback = i;
     }
     return fallback;
+}
+
+function isLikelyComposerInputProps(props: any): boolean {
+    if (!props || typeof props !== "object") return false;
+    if (typeof props.onChangeText !== "function" && typeof props.onChange !== "function") return false;
+    if (props.multiline !== true) return false;
+
+    const placeholder = typeof props.placeholder === "string" ? props.placeholder.toLowerCase() : "";
+    const maxLength = typeof props.maxLength === "number" ? props.maxLength : 0;
+    const lines = typeof props.numberOfLines === "number" ? props.numberOfLines : 0;
+
+    if (placeholder.includes("message") || placeholder.includes("send")) return true;
+    if (maxLength >= 1000) return true;
+    if (lines > 1) return true;
+    return false;
+}
+
+function wrapComposerProps(props: Record<string, any>): Record<string, any> {
+    if (!storage.recoverInComposer) return props;
+    if ((props as any).__pasteMarkdownFixerWrapped) return props;
+    if (!isLikelyComposerInputProps(props)) return props;
+
+    const wrapped = { ...props, __pasteMarkdownFixerWrapped: true };
+
+    if (typeof props.onChangeText === "function") {
+        const originalOnChangeText = props.onChangeText;
+        wrapped.onChangeText = (text: string) => {
+            const recovered = typeof text === "string" ? maybeRecoverFromClipboard(text) : text;
+            return originalOnChangeText(recovered);
+        };
+    }
+
+    if (typeof props.onChange === "function") {
+        const originalOnChange = props.onChange;
+        wrapped.onChange = (event: any) => {
+            try {
+                const text = event?.nativeEvent?.text;
+                if (typeof text === "string") {
+                    const recovered = maybeRecoverFromClipboard(text);
+                    if (recovered !== text) {
+                        event = {
+                            ...event,
+                            nativeEvent: { ...(event?.nativeEvent ?? {}), text: recovered },
+                        };
+                    }
+                }
+            } catch { }
+
+            return originalOnChange(event);
+        };
+    }
+
+    return wrapped;
 }
 
 function patchClipboardReads() {
@@ -176,9 +231,44 @@ function patchSends() {
     );
 }
 
+function patchComposerTextInputs() {
+    const jsxRuntime = findByProps("jsx", "jsxs");
+    if (jsxRuntime) {
+        for (const method of ["jsx", "jsxs"] as const) {
+            if (typeof jsxRuntime[method] !== "function") continue;
+            unpatches.push(
+                instead(method, jsxRuntime, (args, orig) => {
+                    const [type, props, ...rest] = args as [any, Record<string, any>, ...any[]];
+                    const name = String(type?.displayName ?? type?.name ?? type ?? "");
+                    if (name.includes("TextInput") && props && typeof props === "object") {
+                        return (orig as (...callArgs: any[]) => any)(type, wrapComposerProps(props), ...rest);
+                    }
+
+                    return (orig as (...callArgs: any[]) => any)(...args);
+                }),
+            );
+        }
+    }
+
+    if (React && typeof React.createElement === "function") {
+        unpatches.push(
+            instead("createElement", React, (args, orig) => {
+                const [type, props, ...children] = args as [any, Record<string, any>, ...any[]];
+                const name = String(type?.displayName ?? type?.name ?? type ?? "");
+                if (name.includes("TextInput") && props && typeof props === "object") {
+                    return (orig as (...callArgs: any[]) => any)(type, wrapComposerProps(props), ...children);
+                }
+
+                return (orig as (...callArgs: any[]) => any)(...args);
+            }),
+        );
+    }
+}
+
 export default {
     onLoad() {
         patchClipboardReads();
+        patchComposerTextInputs();
         patchDraftSaves();
         patchSends();
     },

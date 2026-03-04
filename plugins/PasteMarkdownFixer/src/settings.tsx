@@ -10,6 +10,12 @@ export default () => {
         <ErrorBoundary>
             <ReactNative.ScrollView>
                 <Forms.FormSwitchRow
+                    label="Recover in composer"
+                    subLabel="Replace flattened pasted text directly in chat input when clipboard markdown matches"
+                    onValueChange={(v) => storage.recoverInComposer = v}
+                    value={storage.recoverInComposer}
+                />
+                <Forms.FormSwitchRow
                     label="Recover in drafts"
                     subLabel="Use recently-read clipboard text when draft saves look flattened"
                     onValueChange={(v) => storage.recoverInDraft = v}
