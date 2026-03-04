@@ -1,0 +1,1 @@
+{"name":"PasteMarkdownFixer","description":"Improve plain pasted markdown readability by restoring likely bullet lists in drafts and sends","authors":[{"name":"marcmy","id":"92076581404545024"}],"main":"index.js","vendetta":{"icon":"ic_edit_24px"},"hash":"387867911bed01a3dace789e681a5b9ba978613f65a0e527420472af4588f7de"}
