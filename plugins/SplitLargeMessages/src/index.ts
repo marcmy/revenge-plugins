@@ -28,6 +28,14 @@ function logDebug(...args: any[]) {
   } catch {}
 }
 
+function safeObjectValues(value: any): any[] {
+  try {
+    return Object.values(value);
+  } catch {
+    return [];
+  }
+}
+
 function markPatchedGuard(target: object, key: string): boolean {
   const patched = patchedGuardTargets.get(target) ?? new Set<string>();
   if (patched.has(key)) return false;
@@ -86,11 +94,9 @@ function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>
 
   for (const mod of modules) {
     addTarget(mod);
-    try {
-      for (const value of Object.values(mod)) {
-        addTarget(value);
-      }
-    } catch {}
+    for (const value of safeObjectValues(mod)) {
+      addTarget(value);
+    }
   }
 
   return [...targets];
@@ -122,7 +128,7 @@ function patchMessageLengthConstants() {
 
   for (const mod of modules) {
     patchTarget(mod);
-    for (const value of Object.values(mod)) {
+    for (const value of safeObjectValues(mod)) {
       if (!value || typeof value !== "object") continue;
       patchTarget(value);
     }
@@ -733,7 +739,7 @@ export default {
 
       for (const mod of modules) {
         tryPatchTarget(mod);
-        for (const nested of Object.values(mod)) {
+        for (const nested of safeObjectValues(mod)) {
           if (!nested || typeof nested !== "object") continue;
           tryPatchTarget(nested as Record<string, any>);
         }
