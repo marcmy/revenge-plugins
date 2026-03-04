@@ -1,5 +1,5 @@
 {
-  "name": "SplitLargeMessages r304i",
+  "name": "SplitLargeMessages r304j",
   "description": "Automatically splits messages larger than 2000/4000 characters",
   "authors": [
     {

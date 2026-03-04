@@ -265,36 +265,67 @@ function isAutoTextUpload(upload: any): boolean {
 }
 
 function intoChunks(content: string, maxChunkLength: number): string[] | false {
-  const chunks = [] as string[];
+  const chunks: string[] = [];
+  let remaining = content;
+  const preferWords = !!storage.splitOnWords;
+  const fenceCount = (text: string) => (text.match(/```/g) ?? []).length;
+  const isFenceBalanced = (text: string) => fenceCount(text) % 2 === 0;
 
-  if (!storage.splitOnWords) {
-    chunks.push(
-      content.split("\n").reduce((currentChunk, paragraph) => {
-        if (currentChunk.length + paragraph.length + 2 > maxChunkLength) {
-          chunks.push(currentChunk);
-          return paragraph + "\n";
-        }
-        if (!currentChunk) return paragraph + "\n";
-        return currentChunk + paragraph + "\n";
-      }, ""),
-    );
-  }
+  const pickSplitIndex = (slice: string) => {
+    const candidates: number[] = [];
+    const pushCandidate = (index: number) => {
+      if (index <= 0 || index >= slice.length) return;
+      candidates.push(index);
+    };
 
-  if (chunks.length && !chunks.some((chunk) => chunk.length > maxChunkLength)) {
-    return chunks;
-  }
+    if (!preferWords) {
+      pushCandidate(slice.lastIndexOf("\n\n"));
+      pushCandidate(slice.lastIndexOf("\n"));
+    }
+    pushCandidate(slice.lastIndexOf(" "));
 
-  chunks.length = 0;
-  chunks.push(
-    content.split(" ").reduce((currentChunk, word) => {
-      if (currentChunk.length + word.length + 2 > maxChunkLength) {
-        chunks.push(currentChunk);
-        return word + " ";
+    for (const candidate of candidates) {
+      if (isFenceBalanced(slice.slice(0, candidate))) return candidate;
+    }
+
+    return candidates[0] ?? slice.length;
+  };
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxChunkLength) {
+      chunks.push(remaining);
+      break;
+    }
+
+    const slice = remaining.slice(0, maxChunkLength);
+    let splitAt = pickSplitIndex(slice);
+
+    if (splitAt <= 0 || splitAt > slice.length) splitAt = slice.length;
+
+    let takeLength = splitAt;
+    let dropLength = splitAt;
+
+    if (!preferWords) {
+      if (slice.startsWith("\n\n", splitAt)) {
+        takeLength = Math.min(splitAt + 2, slice.length);
+        dropLength = takeLength;
+      } else if (slice[splitAt] === "\n") {
+        takeLength = Math.min(splitAt + 1, slice.length);
+        dropLength = takeLength;
+      } else if (slice[splitAt] === " ") {
+        takeLength = Math.min(splitAt + 1, slice.length);
+        dropLength = takeLength;
       }
-      if (!currentChunk) return word + " ";
-      return currentChunk + word + " ";
-    }, ""),
-  );
+    } else if (slice[splitAt] === " ") {
+      takeLength = Math.min(splitAt + 1, slice.length);
+      dropLength = takeLength;
+    }
+
+    const chunk = slice.slice(0, takeLength);
+    if (!chunk.length) return false;
+    chunks.push(chunk);
+    remaining = remaining.slice(dropLength);
+  }
 
   if (chunks.some((chunk) => chunk.length > maxChunkLength)) return false;
   return chunks;
