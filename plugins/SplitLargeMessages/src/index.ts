@@ -29,10 +29,24 @@ function logDebug(...args: any[]) {
 
 function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>> {
   const targets = new Set<Record<string, any>>();
+  const hasAnyMethod = (obj: any) => {
+    if (!obj || typeof obj !== "object") return false;
+    try {
+      if (methods.some((method) => typeof obj[method] === "function")) {
+        return true;
+      }
+    } catch {}
+    try {
+      const proto = Object.getPrototypeOf(obj) as Record<string, any> | null;
+      if (!proto || proto === Object.prototype) return false;
+      return methods.some((method) => typeof proto[method] === "function");
+    } catch {}
+    return false;
+  };
   const addTarget = (obj: any) => {
     try {
       if (!obj || typeof obj !== "object") return;
-      if (methods.some((method) => typeof obj[method] === "function")) {
+      if (hasAnyMethod(obj)) {
         targets.add(obj as Record<string, any>);
       }
     } catch {}
@@ -41,13 +55,13 @@ function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>
   const modules = findAll((m) => {
     try {
       if (!m || typeof m !== "object") return false;
-      if (methods.some((method) => typeof (m as Record<string, any>)[method] === "function")) {
+      if (hasAnyMethod(m)) {
         return true;
       }
 
       for (const value of Object.values(m as Record<string, any>)) {
         if (!value || typeof value !== "object") continue;
-        if (methods.some((method) => typeof (value as Record<string, any>)[method] === "function")) {
+        if (hasAnyMethod(value)) {
           return true;
         }
       }
@@ -141,6 +155,31 @@ function collectStringsDeep(value: any, out: string[] = [], depth = 0): string[]
   }
 
   return out;
+}
+
+function getLongestStringDeep(value: any, depth = 0, seen = new Set<any>()): string {
+  if (value == null || depth > 6) return "";
+  if (typeof value === "string") return value;
+  if (typeof value !== "object") return "";
+  if (seen.has(value)) return "";
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    let best = "";
+    for (const item of value) {
+      const candidate = getLongestStringDeep(item, depth + 1, seen);
+      if (candidate.length > best.length) best = candidate;
+    }
+    return best;
+  }
+
+  let best = "";
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === "onConfirm" || key === "onCancel" || key === "render" || key === "children") continue;
+    const candidate = getLongestStringDeep(nested, depth + 1, seen);
+    if (candidate.length > best.length) best = candidate;
+  }
+  return best;
 }
 
 function extractContentFromUnknown(value: any, depth = 0): string {
@@ -435,7 +474,8 @@ export default {
       const channelId = SelectedChannelStore?.getChannelId?.();
       if (!channelId) return orig(...modalArgs);
 
-      if (!splitAndSendFromChannel(channelId)) return orig(...modalArgs);
+      const modalContent = getLongestStringDeep(modalArgs);
+      if (!splitAndSendFromChannel(channelId, modalContent)) return orig(...modalArgs);
 
       return undefined;
     };
@@ -629,7 +669,7 @@ export default {
     unpatchRawSend?.();
     unpatch = instead("sendMessage", MessageActions, (args, orig) => {
       const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
-      const content = extractContentFromUnknown(message);
+      const content = extractContentFromUnknown(message) || getLongestStringDeep(message);
 
       if (splitAndSendFromChannel(channelId, content)) {
         return undefined;
@@ -671,7 +711,7 @@ export default {
     if (typeof MessageActions._sendMessage === "function") {
       unpatchRawSend = before("_sendMessage", MessageActions, (args) => {
         const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
-        const content = message?.content;
+        const content = extractContentFromUnknown(message) || getLongestStringDeep(message);
 
         if (!content || content.length <= getMaxLength()) return;
 
