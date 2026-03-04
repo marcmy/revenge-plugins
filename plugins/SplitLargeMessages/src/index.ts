@@ -284,6 +284,7 @@ function intoChunks(content: string, maxChunkLength: number): string[] | false {
 
 export default {
   onLoad() {
+    try {
     const ChannelStore = findByStoreName("ChannelStore");
     const SelectedChannelStore = findByStoreName("SelectedChannelStore");
     const UserStore = findByStoreName("UserStore");
@@ -295,6 +296,12 @@ export default {
     const UploadHandler = findByProps("promptToUpload");
     const Popup = findByProps("show", "openLazy");
     const ModalManager = findByProps("openModal", "openModalLazy");
+
+    if (!MessageActions || typeof MessageActions.sendMessage !== "function") {
+      showToast("SplitLargeMessages: send API unavailable", getAssetIDByName("Small"));
+      logDebug("Load aborted: MessageActions.sendMessage missing");
+      return;
+    }
 
     const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
     const sendChunk = async (channelId: string, message: { [key: string]: any }, content: string) => {
@@ -732,6 +739,13 @@ export default {
         message.content = nonEmptyChunks.shift() ?? "";
         void sendChunksSequentially(channelId, nonEmptyChunks);
       });
+    }
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      logDebug("onLoad failed", text);
+      try {
+        showToast(`SplitLargeMessages failed: ${text.slice(0, 80)}`, getAssetIDByName("Small"));
+      } catch {}
     }
   },
   onUnload: () => {
