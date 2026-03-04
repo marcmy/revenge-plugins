@@ -266,11 +266,6 @@ export default {
         content,
       };
 
-      if (typeof MessageActions._sendMessage === "function") {
-        await MessageActions._sendMessage(channelId, chunkMessage, {});
-        return;
-      }
-
       await originalSendMessage(channelId, chunkMessage);
     };
 
@@ -391,6 +386,11 @@ export default {
     };
     const splitAndSendFromChannel = (channelId: string, rawContent?: string) => {
       if (splitAndSend(channelId, rawContent)) return true;
+      const uploads = getChannelUploads(channelId);
+      for (const upload of uploads) {
+        const uploadFile = upload?.item?.file;
+        if (splitAndSendFromAutoTextFile(channelId, uploadFile)) return true;
+      }
       rehydrateDraftFromAutoTextUpload(channelId);
       if (splitAndSend(channelId)) return true;
       return false;
@@ -627,35 +627,46 @@ export default {
 
     unpatch?.();
     unpatchRawSend?.();
-    unpatch = before("sendMessage", MessageActions, (args) => {
+    unpatch = instead("sendMessage", MessageActions, (args, orig) => {
       const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
-      const content = message?.content;
+      const content = extractContentFromUnknown(message);
 
-      if (!content || content.length <= getMaxLength()) return;
+      if (splitAndSendFromChannel(channelId, content)) {
+        return undefined;
+      }
+
+      if (!content || content.length <= getMaxLength()) {
+        return (orig as (channelId: string, message: Record<string, any>) => any)(channelId, message);
+      }
 
       const chunks = intoChunks(content, getMaxLength());
       if (!chunks) {
-        message.content = "";
         showToast("Failed to split message", getAssetIDByName("Small"));
-        return;
+        return undefined;
       }
 
       const nonEmptyChunks = chunks.filter((chunk) => chunk.length > 0);
       if (!nonEmptyChunks.length) {
-        message.content = "";
         showToast("Failed to split message", getAssetIDByName("Small"));
-        return;
+        return undefined;
       }
 
-      message.content = nonEmptyChunks.shift() ?? "";
+      const firstChunk = nonEmptyChunks.shift() ?? "";
+      const firstMessage = {
+        ...message,
+        content: firstChunk,
+      };
 
       const channel = ChannelStore.getChannel(channelId);
-      (async () => {
+      void (async () => {
+        await originalSendMessage(channelId, firstMessage);
         for (const chunk of nonEmptyChunks) {
           await sleep(Math.max((channel?.rateLimitPerUser ?? 0) * 1000, 1000));
           await sendChunk(channelId, message, chunk);
         }
       })();
+
+      return undefined;
     });
     if (typeof MessageActions._sendMessage === "function") {
       unpatchRawSend = before("_sendMessage", MessageActions, (args) => {
