@@ -49,6 +49,11 @@ function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>
       if (hasAnyMethod(obj)) {
         targets.add(obj as Record<string, any>);
       }
+      const proto = Object.getPrototypeOf(obj) as Record<string, any> | null;
+      if (!proto || proto === Object.prototype) return;
+      if (hasAnyMethod(proto)) {
+        targets.add(proto);
+      }
     } catch {}
   };
 
@@ -90,7 +95,7 @@ function patchMessageLengthConstants() {
     let touched = false;
 
     for (const key of Object.keys(mod)) {
-      if (!key.includes("MAX_MESSAGE_LENGTH")) continue;
+      if (!key.includes("MESSAGE_LENGTH")) continue;
       if (typeof mod[key] !== "number") continue;
 
       if (!(key in previousValues)) {
@@ -103,7 +108,7 @@ function patchMessageLengthConstants() {
     if (touched) patchedLengthModules.set(mod, previousValues);
   };
   const modules = findAll(
-    (m) => m && typeof m === "object" && Object.keys(m).some((key) => key.includes("MAX_MESSAGE_LENGTH")),
+    (m) => m && typeof m === "object" && Object.keys(m).some((key) => key.includes("MESSAGE_LENGTH")),
   ) as Array<Record<string, any>>;
 
   for (const mod of modules) {
