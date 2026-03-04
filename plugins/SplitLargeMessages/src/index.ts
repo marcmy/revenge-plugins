@@ -16,10 +16,7 @@ const patchedPopupTargets = new Set<object>();
 const patchedUploadTargets = new Set<object>();
 const patchedComposerTargets = new Set<object>();
 const patchedLargeDialogTargets = new Set<object>();
-const patchedSendTargets = new Set<object>();
 const rehydratingDraftChannels = new Set<string>();
-const sendUnpatches: Array<() => void> = [];
-const debugHitKeys = new Set<string>();
 let warningPatchInterval: ReturnType<typeof setInterval> | undefined;
 let draftRehydrateInterval: ReturnType<typeof setInterval> | undefined;
 storage.splitOnWords ??= false;
@@ -27,15 +24,6 @@ storage.splitOnWords ??= false;
 function logDebug(...args: any[]) {
   try {
     console.log("[SplitLargeMessages]", ...args);
-  } catch {}
-}
-
-function debugHit(label: string) {
-  if (debugHitKeys.has(label)) return;
-  debugHitKeys.add(label);
-  logDebug("Hit", label);
-  try {
-    showToast(`SplitLargeMessages: ${label}`, getAssetIDByName("Small"));
   } catch {}
 }
 
@@ -465,7 +453,6 @@ export default {
 
       const content = extractContentFromUnknown(props) || getDraftText(channelId, DraftStore);
 
-      debugHit("warning");
       if (!splitAndSendFromChannel(channelId, content)) return orig(props);
 
       return { shouldClear: false, shouldRefocus: true };
@@ -488,7 +475,6 @@ export default {
       if (!channelId) return orig(...modalArgs);
 
       const modalContent = getLongestStringDeep(modalArgs);
-      debugHit("popup");
       if (!splitAndSendFromChannel(channelId, modalContent)) return orig(...modalArgs);
 
       return undefined;
@@ -615,7 +601,6 @@ export default {
 
               const directContent = extractContentFromUnknown(firstArg);
 
-              debugHit("composer");
               if (!splitAndSendFromChannel(channelId, directContent)) return orig(...args);
               return undefined;
             }),
@@ -650,7 +635,6 @@ export default {
 
                 const directContent = extractContentFromUnknown(firstArg);
 
-                debugHit("large-dialog");
                 if (!splitAndSendFromChannel(channelId, directContent)) return orig(...args);
                 return undefined;
               }),
@@ -662,64 +646,6 @@ export default {
 
       if (patchedCount > 0) logDebug("Patched large-dialog targets", patchedCount);
     };
-    const patchAllSendTargets = () => {
-      const targets = collectTargetsWithMethods(["sendMessage", "_sendMessage"]);
-      let patchedCount = 0;
-
-      for (const target of targets) {
-        if (patchedSendTargets.has(target)) continue;
-        patchedSendTargets.add(target);
-        patchedCount++;
-
-        if (typeof target.sendMessage === "function") {
-          try {
-            sendUnpatches.push(
-              instead("sendMessage", target, (args, orig) => {
-                const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
-                const content = extractContentFromUnknown(message) || getLongestStringDeep(message);
-                if (content && content.length > getMaxLength()) {
-                  debugHit("send-target");
-                  if (splitAndSendFromChannel(channelId, content)) return undefined;
-                }
-                return (orig as (...rest: any[]) => any)(...args);
-              }),
-            );
-          } catch {}
-        }
-
-        if (typeof target._sendMessage === "function") {
-          try {
-            sendUnpatches.push(
-              before("_sendMessage", target, (args) => {
-                const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
-                const content = extractContentFromUnknown(message) || getLongestStringDeep(message);
-                if (!content || content.length <= getMaxLength()) return;
-
-                debugHit("raw-send-target");
-                const chunks = intoChunks(content, getMaxLength());
-                if (!chunks) {
-                  message.content = "";
-                  showToast("Failed to split message", getAssetIDByName("Small"));
-                  return;
-                }
-
-                const nonEmptyChunks = chunks.filter((chunk) => chunk.length > 0);
-                if (!nonEmptyChunks.length) {
-                  message.content = "";
-                  showToast("Failed to split message", getAssetIDByName("Small"));
-                  return;
-                }
-
-                message.content = nonEmptyChunks.shift() ?? "";
-                void sendChunksSequentially(channelId, nonEmptyChunks);
-              }),
-            );
-          } catch {}
-        }
-      }
-
-      if (patchedCount > 0) logDebug("Patched send targets", patchedCount);
-    };
 
     logDebug("Plugin loaded");
     patchMessageLengthConstants();
@@ -728,7 +654,6 @@ export default {
     patchUploadTargets();
     patchComposerTargets();
     patchLargeDialogTargets();
-    patchAllSendTargets();
     pollDraftRehydrate();
     draftRehydrateInterval = setInterval(pollDraftRehydrate, 250);
     warningPatchInterval = setInterval(() => {
@@ -738,18 +663,15 @@ export default {
       patchUploadTargets();
       patchComposerTargets();
       patchLargeDialogTargets();
-      patchAllSendTargets();
     }, 3000);
 
     unpatch?.();
     unpatchRawSend?.();
-    debugHit("loaded");
     unpatch = instead("sendMessage", MessageActions, (args, orig) => {
       const [channelId, message] = args as [string, { content?: string; [key: string]: any }];
       const content = extractContentFromUnknown(message) || getLongestStringDeep(message);
 
       if (splitAndSendFromChannel(channelId, content)) {
-        debugHit("sendMessage");
         return undefined;
       }
 
@@ -792,7 +714,6 @@ export default {
         const content = extractContentFromUnknown(message) || getLongestStringDeep(message);
 
         if (!content || content.length <= getMaxLength()) return;
-        debugHit("_sendMessage");
 
         const chunks = intoChunks(content, getMaxLength());
         if (!chunks) {
@@ -831,18 +752,11 @@ export default {
         warningUnpatches.pop()?.();
       } catch {}
     }
-    while (sendUnpatches.length) {
-      try {
-        sendUnpatches.pop()?.();
-      } catch {}
-    }
     patchedWarningTargets.clear();
     patchedPopupTargets.clear();
     patchedUploadTargets.clear();
     patchedComposerTargets.clear();
     patchedLargeDialogTargets.clear();
-    patchedSendTargets.clear();
-    debugHitKeys.clear();
     rehydratingDraftChannels.clear();
 
     restoreMessageLengthConstants();
