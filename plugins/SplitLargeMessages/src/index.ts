@@ -16,6 +16,7 @@ const patchedPopupTargets = new Set<object>();
 const patchedUploadTargets = new Set<object>();
 const patchedComposerTargets = new Set<object>();
 const patchedLargeDialogTargets = new Set<object>();
+const patchedGuardMethodTargets = new Set<object>();
 const rehydratingDraftChannels = new Set<string>();
 let draftRehydrateInterval: ReturnType<typeof setInterval> | undefined;
 const patchRetryTimeouts: Array<ReturnType<typeof setTimeout>> = [];
@@ -681,6 +682,61 @@ export default {
 
       if (patchedCount > 0) logDebug("Patched large-dialog targets", patchedCount);
     };
+    const patchTooLongGuardMethods = () => {
+      const booleanGuardMethods = [
+        "isMessageTooLong",
+        "isContentTooLong",
+        "shouldShowLargeMessageDialog",
+        "shouldShowMessageTooLongDialog",
+      ] as const;
+      const maxLengthMethods = ["getMaxMessageLength", "getMessageLengthLimit", "getMaxCharacterCount"] as const;
+      const targets = collectTargetsWithMethods([...booleanGuardMethods, ...maxLengthMethods]);
+      let patchedCount = 0;
+
+      for (const target of targets) {
+        if (patchedGuardMethodTargets.has(target)) continue;
+        patchedGuardMethodTargets.add(target);
+        patchedCount++;
+
+        for (const method of booleanGuardMethods) {
+          if (typeof (target as any)[method] !== "function") continue;
+          try {
+            warningUnpatches.push(
+              instead(method, target, (args, orig) => {
+                const firstArg = (args as any[])?.[0];
+                const channelId = resolveChannelId(firstArg, ...(args as any[]));
+                const content = extractContentFromUnknown(firstArg) || getLongestStringDeep(args);
+
+                if (channelId && content && content.length > getMaxLength()) {
+                  if (splitAndSendFromChannel(channelId, content)) return false;
+                }
+
+                const result = (orig as (...callArgs: any[]) => any)(...(args as any[]));
+                if (typeof result === "boolean" && result) return false;
+                return result;
+              }),
+            );
+          } catch {}
+        }
+
+        for (const method of maxLengthMethods) {
+          if (typeof (target as any)[method] !== "function") continue;
+          try {
+            warningUnpatches.push(
+              instead(method, target, (args, orig) => {
+                const result = (orig as (...callArgs: any[]) => any)(...(args as any[]));
+                if (typeof result === "number" && result > 0 && result <= 10000) {
+                  return 2 ** 30;
+                }
+                return result;
+              }),
+            );
+          } catch {}
+        }
+      }
+
+      if (patchedCount > 0) logDebug("Patched named guard methods", patchedCount);
+    };
     const runPatchSweep = () => {
       patchMessageLengthConstants();
       patchWarningTargets();
@@ -688,6 +744,7 @@ export default {
       patchUploadTargets();
       patchComposerTargets();
       patchLargeDialogTargets();
+      patchTooLongGuardMethods();
     };
 
     logDebug("Plugin loaded");
@@ -832,6 +889,7 @@ export default {
     patchedUploadTargets.clear();
     patchedComposerTargets.clear();
     patchedLargeDialogTargets.clear();
+    patchedGuardMethodTargets.clear();
     rehydratingDraftChannels.clear();
 
     restoreMessageLengthConstants();
