@@ -11,10 +11,11 @@ type ClipboardSnapshot = {
 
 const unpatches: Array<() => void> = [];
 let lastClipboardSnapshot: ClipboardSnapshot | undefined;
+let clipboardPollInterval: ReturnType<typeof setInterval> | undefined;
 
 storage.recoverInDraft ??= true;
 storage.recoverOnSend ??= true;
-storage.recoveryWindowMs ??= 8000;
+storage.recoveryWindowMs ??= 180000;
 
 function now() {
     return Date.now();
@@ -31,6 +32,18 @@ function hasMarkdownSignals(text: string): boolean {
     );
 }
 
+function flattenMarkdownLike(text: string): string {
+    return text
+        .replace(/```[\w-]*\n?/g, "")
+        .replace(/```/g, "")
+        .replace(/(^|\n)\s*#{1,6}\s+/g, "$1")
+        .replace(/(^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)/g, "$1")
+        .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+        .replace(/`([^`\n]+)`/g, "$1")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
 function looksFlattenedComparedTo(raw: string, current: string): boolean {
     if (!raw || !current) return false;
     if (raw === current) return false;
@@ -38,6 +51,13 @@ function looksFlattenedComparedTo(raw: string, current: string): boolean {
     const rawMarkdown = hasMarkdownSignals(raw);
     const currentMarkdown = hasMarkdownSignals(current);
     if (rawMarkdown && !currentMarkdown) return true;
+
+    const flattenedRaw = flattenMarkdownLike(raw);
+    if (flattenedRaw && current) {
+        const a = flattenedRaw.replace(/\s+/g, " ").trim();
+        const b = current.replace(/\s+/g, " ").trim();
+        if (a === b || a.includes(b) || b.includes(a)) return true;
+    }
 
     const rawLines = raw.split("\n").length;
     const currentLines = current.split("\n").length;
@@ -96,6 +116,21 @@ function patchClipboardReads() {
             return result;
         }),
     );
+
+    const poll = () => {
+        try {
+            const result = clipboard.getString();
+            if (!result || typeof result.then !== "function") return;
+            void result.then((text: string) => {
+                if (typeof text !== "string" || text.length === 0) return;
+                if (lastClipboardSnapshot?.text === text) return;
+                lastClipboardSnapshot = { text, at: now() };
+            }).catch(() => { });
+        } catch { }
+    };
+
+    poll();
+    clipboardPollInterval = setInterval(poll, 1500);
 }
 
 function patchDraftSaves() {
@@ -152,6 +187,10 @@ export default {
             try {
                 unpatches.pop()?.();
             } catch { }
+        }
+        if (clipboardPollInterval) {
+            clearInterval(clipboardPollInterval);
+            clipboardPollInterval = undefined;
         }
         lastClipboardSnapshot = undefined;
     },
