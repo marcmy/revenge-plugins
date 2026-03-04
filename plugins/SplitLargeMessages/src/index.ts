@@ -30,39 +30,6 @@ function logDebug(...args: any[]) {
 function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>> {
   const targets = new Set<Record<string, any>>();
   const addTarget = (obj: any) => {
-    if (!obj || typeof obj !== "object") return;
-
-    if (methods.some((method) => typeof obj[method] === "function")) {
-      targets.add(obj as Record<string, any>);
-    }
-
-    const proto = Object.getPrototypeOf(obj) as Record<string, any> | null;
-    if (!proto || proto === Object.prototype) return;
-    if (methods.some((method) => typeof proto[method] === "function")) {
-      targets.add(proto);
-    }
-  };
-
-  const modules = findAll((m) => m && typeof m === "object") as Array<Record<string, any>>;
-  for (const mod of modules) {
-    addTarget(mod);
-    for (const value of Object.values(mod)) {
-      addTarget(value);
-    }
-  }
-
-  return [...targets];
-}
-
-function logDebug(...args: any[]) {
-  try {
-    console.log("[SplitLargeMessages]", ...args);
-  } catch {}
-}
-
-function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>> {
-  const targets = new Set<Record<string, any>>();
-  const addTarget = (obj: any) => {
     try {
       if (!obj || typeof obj !== "object") return;
       if (methods.some((method) => typeof obj[method] === "function")) {
