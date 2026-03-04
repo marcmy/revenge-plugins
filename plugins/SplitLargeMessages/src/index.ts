@@ -22,7 +22,6 @@ const rehydratingDraftChannels = new Set<string>();
 let draftRehydrateInterval: ReturnType<typeof setInterval> | undefined;
 const patchRetryTimeouts: Array<ReturnType<typeof setTimeout>> = [];
 storage.splitOnWords ??= false;
-storage.fixPlainLists ??= false;
 
 function logDebug(...args: any[]) {
   try {
@@ -266,119 +265,39 @@ function isAutoTextUpload(upload: any): boolean {
 }
 
 function intoChunks(content: string, maxChunkLength: number): string[] | false {
-  const chunks: string[] = [];
-  let remaining = content;
-  const preferWords = !!storage.splitOnWords;
-  const fenceCount = (text: string) => (text.match(/```/g) ?? []).length;
-  const isFenceBalanced = (text: string) => fenceCount(text) % 2 === 0;
+  const chunks = [] as string[];
 
-  const pickSplitIndex = (slice: string) => {
-    const candidates: number[] = [];
-    const pushCandidate = (index: number) => {
-      if (index <= 0 || index >= slice.length) return;
-      candidates.push(index);
-    };
-
-    if (!preferWords) {
-      pushCandidate(slice.lastIndexOf("\n\n"));
-      pushCandidate(slice.lastIndexOf("\n"));
-    }
-    pushCandidate(slice.lastIndexOf(" "));
-
-    for (const candidate of candidates) {
-      if (isFenceBalanced(slice.slice(0, candidate))) return candidate;
-    }
-
-    return candidates[0] ?? slice.length;
-  };
-
-  while (remaining.length > 0) {
-    if (remaining.length <= maxChunkLength) {
-      chunks.push(remaining);
-      break;
-    }
-
-    const slice = remaining.slice(0, maxChunkLength);
-    let splitAt = pickSplitIndex(slice);
-
-    if (splitAt <= 0 || splitAt > slice.length) splitAt = slice.length;
-
-    let takeLength = splitAt;
-    let dropLength = splitAt;
-
-    if (!preferWords) {
-      if (slice.startsWith("\n\n", splitAt)) {
-        takeLength = Math.min(splitAt + 2, slice.length);
-        dropLength = takeLength;
-      } else if (slice[splitAt] === "\n") {
-        takeLength = Math.min(splitAt + 1, slice.length);
-        dropLength = takeLength;
-      } else if (slice[splitAt] === " ") {
-        takeLength = Math.min(splitAt + 1, slice.length);
-        dropLength = takeLength;
-      }
-    } else if (slice[splitAt] === " ") {
-      takeLength = Math.min(splitAt + 1, slice.length);
-      dropLength = takeLength;
-    }
-
-    const chunk = slice.slice(0, takeLength);
-    if (!chunk.length) return false;
-    chunks.push(chunk);
-    remaining = remaining.slice(dropLength);
+  if (!storage.splitOnWords) {
+    chunks.push(
+      content.split("\n").reduce((currentChunk, paragraph) => {
+        if (currentChunk.length + paragraph.length + 2 > maxChunkLength) {
+          chunks.push(currentChunk);
+          return paragraph + "\n";
+        }
+        if (!currentChunk) return paragraph + "\n";
+        return currentChunk + paragraph + "\n";
+      }, ""),
+    );
   }
+
+  if (chunks.length && !chunks.some((chunk) => chunk.length > maxChunkLength)) {
+    return chunks.map((c) => c.trim());
+  }
+
+  chunks.length = 0;
+  chunks.push(
+    content.split(" ").reduce((currentChunk, word) => {
+      if (currentChunk.length + word.length + 2 > maxChunkLength) {
+        chunks.push(currentChunk);
+        return word + " ";
+      }
+      if (!currentChunk) return word + " ";
+      return currentChunk + word + " ";
+    }, ""),
+  );
 
   if (chunks.some((chunk) => chunk.length > maxChunkLength)) return false;
-  return chunks;
-}
-
-function normalizePlainListMarkdown(content: string): string {
-  if (!storage.fixPlainLists) return content;
-
-  const lines = content.split("\n");
-  let inFence = false;
-  const isAlreadyList = (line: string) => /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line);
-  const isCandidateItem = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return false;
-    if (trimmed.length > 100) return false;
-    if (isAlreadyList(trimmed)) return false;
-    return true;
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.includes("```")) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    if (!/:\s*$/.test(line)) continue;
-
-    let start = i + 1;
-    while (start < lines.length && lines[start].trim() === "") start++;
-    let end = start;
-
-    while (end < lines.length) {
-      const current = lines[end];
-      if (current.includes("```")) break;
-      if (current.trim() === "") break;
-      end++;
-    }
-
-    if (end - start < 2) continue;
-    const block = lines.slice(start, end);
-    if (!block.every(isCandidateItem)) continue;
-
-    for (let j = start; j < end; j++) {
-      const indent = lines[j].match(/^\s*/)?.[0] ?? "";
-      lines[j] = `${indent}- ${lines[j].trimStart()}`;
-    }
-
-    i = end - 1;
-  }
-
-  return lines.join("\n");
+  return chunks.map((c) => c.trim());
 }
 
 export default {
@@ -545,8 +464,7 @@ export default {
       rehydrateDraftFromAutoTextUpload(channelId);
     };
     const splitAndSend = (channelId: string, rawContent?: string) => {
-      const originalContent = (typeof rawContent === "string" ? rawContent : "") || getDraftText(channelId, DraftStore);
-      const content = normalizePlainListMarkdown(originalContent);
+      const content = (typeof rawContent === "string" ? rawContent : "") || getDraftText(channelId, DraftStore);
       if (!content || content.length <= getMaxLength()) return false;
 
       const chunks = intoChunks(content, getMaxLength());
