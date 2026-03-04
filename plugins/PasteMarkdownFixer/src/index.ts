@@ -1,125 +1,139 @@
 import { findByProps } from "@vendetta/metro";
-import { before } from "@vendetta/patcher";
+import { before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
 import settings from "./settings";
 
+type ClipboardSnapshot = {
+    text: string;
+    at: number;
+};
+
 const unpatches: Array<() => void> = [];
+let lastClipboardSnapshot: ClipboardSnapshot | undefined;
 
-storage.fixListsInDraft ??= true;
-storage.fixListsOnSend ??= true;
+storage.recoverInDraft ??= true;
+storage.recoverOnSend ??= true;
+storage.recoveryWindowMs ??= 8000;
 
-function countFenceTokens(line: string): number {
-    return (line.match(/```/g) ?? []).length;
+function now() {
+    return Date.now();
 }
 
-function isExistingListLine(line: string): boolean {
-    return /^\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(line);
+function hasMarkdownSignals(text: string): boolean {
+    return (
+        /(^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)/.test(text)
+        || /(^|\n)\s*#{1,6}\s+/.test(text)
+        || /```/.test(text)
+        || /(^|\n)\s*>/.test(text)
+        || /\*\*[^*\n]+\*\*/.test(text)
+        || /`[^`\n]+`/.test(text)
+    );
 }
 
-function isLikelyHeadingLine(line: string): boolean {
-    const trimmed = line.trim();
-    if (!trimmed) return false;
-    return /:\s*$/.test(trimmed) || /^#{1,6}\s+/.test(trimmed) || /^\*\*.+\*\*$/.test(trimmed);
+function looksFlattenedComparedTo(raw: string, current: string): boolean {
+    if (!raw || !current) return false;
+    if (raw === current) return false;
+
+    const rawMarkdown = hasMarkdownSignals(raw);
+    const currentMarkdown = hasMarkdownSignals(current);
+    if (rawMarkdown && !currentMarkdown) return true;
+
+    const rawLines = raw.split("\n").length;
+    const currentLines = current.split("\n").length;
+    if (rawLines - currentLines >= 2) return true;
+
+    return false;
 }
 
-function isLikelyListItemLine(line: string): boolean {
-    const trimmed = line.trim();
-    if (!trimmed) return false;
-    if (trimmed.length > 120) return false;
-    if (isExistingListLine(trimmed)) return false;
-    if (/^#{1,6}\s+/.test(trimmed)) return false;
-    if (/^```/.test(trimmed)) return false;
-    return true;
+function maybeRecoverFromClipboard(current: string): string {
+    const snapshot = lastClipboardSnapshot;
+    if (!snapshot) return current;
+
+    const windowMs = typeof storage.recoveryWindowMs === "number"
+        ? storage.recoveryWindowMs
+        : 8000;
+    if (now() - snapshot.at > Math.max(500, windowMs)) return current;
+
+    if (!looksFlattenedComparedTo(snapshot.text, current)) return current;
+    return snapshot.text;
 }
 
-function normalizePlainLists(content: string): string {
-    const lines = content.split("\n");
-    let inFence = false;
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        const fenceTokens = countFenceTokens(line);
-        if (fenceTokens % 2 === 1) {
-            inFence = !inFence;
-        }
-        if (inFence) continue;
-        if (!isLikelyHeadingLine(line)) continue;
-
-        let start = i + 1;
-        while (start < lines.length && lines[start].trim() === "") start++;
-        if (start >= lines.length) continue;
-
-        let end = start;
-        while (end < lines.length) {
-            const current = lines[end];
-            if (!current.trim()) break;
-            if (!isLikelyListItemLine(current)) break;
-            end++;
-        }
-
-        if (end - start < 2) continue;
-
-        for (let j = start; j < end; j++) {
-            const indent = lines[j].match(/^\s*/)?.[0] ?? "";
-            lines[j] = `${indent}- ${lines[j].trimStart()}`;
-        }
-
-        i = end - 1;
-    }
-
-    return lines.join("\n");
-}
-
-function findDraftTextArgIndex(args: any[]): number {
+function findTextArgIndex(args: any[]): number {
     let fallback = -1;
     for (let i = args.length - 1; i >= 0; i--) {
         const value = args[i];
         if (typeof value !== "string") continue;
         if (i === 0 && /^\d+$/.test(value)) continue;
-        if (value.length === 0) continue;
-        if (value.includes("\n") || value.includes(":") || value.length > 80) return i;
+        if (!value.length) continue;
+        if (value.includes("\n") || value.length > 80) return i;
         fallback = i;
     }
-
     return fallback;
 }
 
-function patchSaveDraft() {
+function patchClipboardReads() {
+    const clipboard = findByProps("setString", "getString", "hasString");
+    if (!clipboard || typeof clipboard.getString !== "function") return;
+
+    unpatches.push(
+        instead("getString", clipboard, (args, orig) => {
+            const result = (orig as (...callArgs: any[]) => any)(...(args as any[]));
+
+            if (result && typeof result.then === "function") {
+                return result.then((text: string) => {
+                    if (typeof text === "string" && text.length > 0) {
+                        lastClipboardSnapshot = { text, at: now() };
+                    }
+                    return text;
+                });
+            }
+
+            if (typeof result === "string" && result.length > 0) {
+                lastClipboardSnapshot = { text: result, at: now() };
+            }
+
+            return result;
+        }),
+    );
+}
+
+function patchDraftSaves() {
     const DraftManager = findByProps("saveDraft");
     if (!DraftManager || typeof DraftManager.saveDraft !== "function") return;
 
     unpatches.push(
         before("saveDraft", DraftManager, (args) => {
-            if (!storage.fixListsInDraft) return;
-            const index = findDraftTextArgIndex(args as any[]);
+            if (!storage.recoverInDraft) return;
+            const index = findTextArgIndex(args as any[]);
             if (index < 0) return;
 
-            const original = (args as any[])[index];
-            if (typeof original !== "string" || !original.length) return;
-            const normalized = normalizePlainLists(original);
-            if (normalized !== original) {
-                (args as any[])[index] = normalized;
+            const current = (args as any[])[index];
+            if (typeof current !== "string" || !current.length) return;
+
+            const recovered = maybeRecoverFromClipboard(current);
+            if (recovered !== current) {
+                (args as any[])[index] = recovered;
             }
         }),
     );
 }
 
-function patchSendMessage() {
+function patchSends() {
     const MessageActions = findByProps("sendMessage", "editMessage");
     if (!MessageActions || typeof MessageActions.sendMessage !== "function") return;
 
     unpatches.push(
         before("sendMessage", MessageActions, (args) => {
-            if (!storage.fixListsOnSend) return;
+            if (!storage.recoverOnSend) return;
 
             for (const value of args as any[]) {
                 if (!value || typeof value !== "object") continue;
-                if (typeof value.content !== "string") continue;
+                if (typeof value.content !== "string" || !value.content.length) continue;
 
-                const normalized = normalizePlainLists(value.content);
-                if (normalized !== value.content) {
-                    value.content = normalized;
+                const recovered = maybeRecoverFromClipboard(value.content);
+                if (recovered !== value.content) {
+                    value.content = recovered;
                 }
                 return;
             }
@@ -129,8 +143,9 @@ function patchSendMessage() {
 
 export default {
     onLoad() {
-        patchSaveDraft();
-        patchSendMessage();
+        patchClipboardReads();
+        patchDraftSaves();
+        patchSends();
     },
     onUnload() {
         while (unpatches.length) {
@@ -138,6 +153,7 @@ export default {
                 unpatches.pop()?.();
             } catch { }
         }
+        lastClipboardSnapshot = undefined;
     },
     settings,
 };

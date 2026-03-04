@@ -10,16 +10,16 @@ export default () => {
         <ErrorBoundary>
             <ReactNative.ScrollView>
                 <Forms.FormSwitchRow
-                    label="Fix lists in drafts"
-                    subLabel="Normalize likely plain list blocks while draft text is saved"
-                    onValueChange={(v) => storage.fixListsInDraft = v}
-                    value={storage.fixListsInDraft}
+                    label="Recover in drafts"
+                    subLabel="Use recently-read clipboard text when draft saves look flattened"
+                    onValueChange={(v) => storage.recoverInDraft = v}
+                    value={storage.recoverInDraft}
                 />
                 <Forms.FormSwitchRow
-                    label="Fix lists on send"
-                    subLabel="Normalize likely plain list blocks immediately before send"
-                    onValueChange={(v) => storage.fixListsOnSend = v}
-                    value={storage.fixListsOnSend}
+                    label="Recover on send"
+                    subLabel="Use recently-read clipboard text when outgoing content looks flattened"
+                    onValueChange={(v) => storage.recoverOnSend = v}
+                    value={storage.recoverOnSend}
                 />
             </ReactNative.ScrollView>
         </ErrorBoundary>
