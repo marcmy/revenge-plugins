@@ -9,6 +9,7 @@ import settings from "./settings";
 
 let unpatch: (() => void) | undefined;
 let unpatchRawSend: (() => void) | undefined;
+let lastSendTemplateArgs: any[] | undefined;
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
 const warningUnpatches: Array<() => void> = [];
 const patchedWarningTargets = new Set<object>();
@@ -321,6 +322,23 @@ export default {
     }
 
     const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
+    const buildSendArgs = (channelId: string, message: Record<string, any>) => {
+      if (!lastSendTemplateArgs?.length) return [channelId, message];
+
+      const nextArgs = [...lastSendTemplateArgs];
+      if (typeof nextArgs[0] === "string") {
+        nextArgs[0] = channelId;
+        nextArgs[1] = { ...(typeof nextArgs[1] === "object" ? nextArgs[1] : {}), ...message };
+        return nextArgs;
+      }
+
+      if (nextArgs[0] && typeof nextArgs[0] === "object") {
+        nextArgs[0] = { ...nextArgs[0], ...message, channelId: nextArgs[0].channelId ?? channelId };
+        return nextArgs;
+      }
+
+      return [channelId, message];
+    };
     const sendChunk = async (channelId: string, message: { [key: string]: any }, content: string) => {
       const chunkMessage = {
         invalidEmojis: message.invalidEmojis,
@@ -329,7 +347,8 @@ export default {
         content,
       };
 
-      await originalSendMessage(channelId, chunkMessage);
+      const args = buildSendArgs(channelId, chunkMessage);
+      await (originalSendMessage as (...callArgs: any[]) => any)(...args);
     };
 
     const getMaxLength = () => (UserStore.getCurrentUser()?.premiumType === 2 ? 4000 : 2000);
@@ -739,11 +758,7 @@ export default {
     };
     const runPatchSweep = () => {
       patchMessageLengthConstants();
-      patchWarningTargets();
-      patchPopupTargets();
       patchUploadTargets();
-      patchComposerTargets();
-      patchLargeDialogTargets();
       patchTooLongGuardMethods();
     };
 
@@ -758,6 +773,7 @@ export default {
     unpatchRawSend?.();
     unpatch = instead("sendMessage", MessageActions, (args, orig) => {
       const sendArgs = args as any[];
+      lastSendTemplateArgs = [...sendArgs];
       const firstArg = sendArgs[0];
       const secondArg = sendArgs[1];
       const message =
