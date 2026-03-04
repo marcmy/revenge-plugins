@@ -281,7 +281,7 @@ function intoChunks(content: string, maxChunkLength: number): string[] | false {
   }
 
   if (chunks.length && !chunks.some((chunk) => chunk.length > maxChunkLength)) {
-    return chunks.map((c) => c.trim());
+    return chunks;
   }
 
   chunks.length = 0;
@@ -297,7 +297,7 @@ function intoChunks(content: string, maxChunkLength: number): string[] | false {
   );
 
   if (chunks.some((chunk) => chunk.length > maxChunkLength)) return false;
-  return chunks.map((c) => c.trim());
+  return chunks;
 }
 
 export default {
