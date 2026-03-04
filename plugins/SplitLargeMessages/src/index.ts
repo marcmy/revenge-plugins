@@ -7,6 +7,8 @@ import { showToast } from "@vendetta/ui/toasts";
 
 import settings from "./settings";
 
+const BUILD_STAMP = "2026-03-04.2";
+
 let unpatch: (() => void) | undefined;
 let unpatchRawSend: (() => void) | undefined;
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
@@ -285,6 +287,7 @@ function intoChunks(content: string, maxChunkLength: number): string[] | false {
 export default {
   onLoad() {
     try {
+    showToast(`SplitLargeMessages ${BUILD_STAMP}`, getAssetIDByName("Small"));
     const ChannelStore = findByStoreName("ChannelStore");
     const SelectedChannelStore = findByStoreName("SelectedChannelStore");
     const UserStore = findByStoreName("UserStore");
