@@ -1,5 +1,4 @@
 .codex-tmp/
-.git/
 node_modules/
 dist/
 .upstream-revenge/
