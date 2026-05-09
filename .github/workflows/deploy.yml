@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - "plugins/**"
-      - "scripts/**"
       - "build.mjs"
       - "package.json"
       - "package-lock.json"
@@ -29,48 +28,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js for local plugins
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
 
-      - name: Install local dependencies
+      - name: Install dependencies
         run: npm ci --no-audit --prefer-offline
 
-      - name: Build local plugin(s)
+      - name: Build plugins
         run: npm run build
-
-      - name: Build patched Cloud Sync
-        run: |
-          git clone --depth 1 https://github.com/nexpid/RevengePlugins.git .upstream-revenge
-          node scripts/patch-cloud-sync.mjs .upstream-revenge
-
-          cd .upstream-revenge
-          corepack enable
-          corepack prepare pnpm@10.13.1 --activate
-          pnpm install --frozen-lockfile
-          pnpm build
-          cd ..
-
-          mkdir -p dist/CloudSyncFixed
-          cp -R .upstream-revenge/dist/cloud-sync/* dist/CloudSyncFixed/
-          rm -f dist/CloudSyncFixed/index.md
-
-          node <<'NODE'
-          const fs = require("fs");
-          const path = require("path");
-
-          const manifestPath = path.join("dist", "CloudSyncFixed", "manifest.json");
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-          manifest.name = "CloudSyncFixed";
-          manifest.description = "Patched Cloud Sync with broken legacy import sheet UI bypassed.";
-          manifest.authors = [
-            { name: "nexpid", id: "853550207039832084" },
-            { name: "marcmy", id: "92076581404545024" }
-          ];
-          fs.writeFileSync(manifestPath, JSON.stringify(manifest));
-          NODE
 
       - name: Copy GitHub Pages files
         run: |
