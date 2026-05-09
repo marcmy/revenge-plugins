@@ -1,0 +1,4 @@
+.codex-tmp/
+node_modules/
+dist/
+.upstream-revenge/

@@ -1,0 +1,14 @@
+{
+  "name": "HideChannelListShortcuts",
+  "description": "Hide Server Boosts (and optionally Events) shortcuts at the top of the channel list",
+  "authors": [
+    {
+      "name": "marcmy",
+      "id": "92076581404545024"
+    }
+  ],
+  "main": "src/index.ts",
+  "vendetta": {
+    "icon": "ic_more_horizontal"
+  }
+}
