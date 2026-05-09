@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 .codex-tmp/
-=======
 .git/
->>>>>>> 1106612 (Modify .gitignore)
 node_modules/
 dist/
 .upstream-revenge/
