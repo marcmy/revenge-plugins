@@ -1,4 +1,4 @@
-import { findByProps } from "@vendetta/metro";
+import { findByProps, findByStoreName } from "@vendetta/metro";
 import { FluxDispatcher, React } from "@vendetta/metro/common";
 import { after, before } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
@@ -30,13 +30,19 @@ const messageCache = new Map<string, MessageSnapshot>();
 const injectedDeletedMessages = new Set<string>();
 const recentlyPreservedDeletes = new Map<string, number>();
 const handledDispatchEvents = new WeakSet<object>();
+const pendingSyntheticLoadChannels = new Set<string>();
+const syntheticLoadAttempts = new Map<string, number>();
+const syntheticLoadTimeouts: Array<ReturnType<typeof setTimeout>> = [];
+let syntheticLoadInterval: ReturnType<typeof setInterval> | undefined;
 const FLUX_DISPATCH_METHODS = ["dispatch", "dirtyDispatch", "maybeDispatch"];
 const RECENTLY_PRESERVED_DELETE_MS = 1500;
+const MAX_SYNTHETIC_LOAD_ATTEMPTS = 8;
 
 const ActionSheet = findByProps("openLazy", "hideActionSheet");
 const ChannelStore = findByProps("getChannel", "getDMFromUserId");
 const ChannelMessages = findByProps("_channelMessages");
 const MessageStore = findByProps("getMessage", "getMessages");
+const SelectedChannelStore = findByStoreName("SelectedChannelStore");
 
 function ensureStorage() {
     const nextSettings = normalizeSettings(storage.settings);
@@ -141,9 +147,25 @@ function getCachedOrStoredMessage(channelId: string, messageId: string) {
     }
 }
 
+function getSelectedChannelId(): string | undefined {
+    try {
+        return SelectedChannelStore?.getChannelId?.() ?? SelectedChannelStore?.getLastSelectedChannelId?.();
+    } catch {
+        return undefined;
+    }
+}
+
 function shouldReinjectDeletedMessages() {
     const settingsValue = normalizeSettings(storage.settings);
     return settingsValue.logDeletes && settingsValue.showDeletedInChannelsAfterRestart;
+}
+
+function getChannelMessageCache(channelId: string) {
+    try {
+        return ChannelMessages?.get?.(channelId) ?? ChannelMessages?._channelMessages?.[channelId] ?? null;
+    } catch {
+        return null;
+    }
 }
 
 function hasStoredMessage(channelId: string, messageId: string) {
@@ -262,6 +284,140 @@ function injectDeletedRecordsIntoMessageBatch(event: any) {
     event.messages = sortMessagesLikeBatch([...event.messages, ...syntheticMessages], event.messages);
 }
 
+function uniqueMessages(messages: any[]): any[] {
+    const seen = new Set<string>();
+    const result: any[] = [];
+
+    for (const message of messages) {
+        if (!message?.id || seen.has(message.id)) continue;
+        seen.add(message.id);
+        result.push(message);
+    }
+
+    return result;
+}
+
+function collectMessagesFromValue(value: any, channelId: string, seen = new WeakSet<object>(), depth = 0): any[] {
+    if (!value || depth > 4) return [];
+
+    if (Array.isArray(value)) return value.flatMap((item) => collectMessagesFromValue(item, channelId, seen, depth + 1));
+
+    if (typeof value !== "object") return [];
+    if (seen.has(value)) return [];
+    seen.add(value);
+
+    if (value.id && (value.channel_id === channelId || value.channelId === channelId)) return [value];
+
+    if (value instanceof Map || value instanceof Set) {
+        return [...value.values()].flatMap((item) => collectMessagesFromValue(item, channelId, seen, depth + 1));
+    }
+
+    for (const key of ["_array", "array", "messages", "_messages", "_orderedList", "_list", "items", "values"]) {
+        if (value[key]) {
+            const found = collectMessagesFromValue(value[key], channelId, seen, depth + 1);
+            if (found.length) return found;
+        }
+    }
+
+    return Object.values(value).flatMap((item) => collectMessagesFromValue(item, channelId, seen, depth + 1));
+}
+
+function getLoadedChannelMessages(channelId: string): any[] {
+    const candidates: any[] = [];
+
+    try {
+        candidates.push(MessageStore?.getMessages?.(channelId));
+    } catch {}
+
+    candidates.push(getChannelMessageCache(channelId));
+
+    return uniqueMessages(
+        candidates.flatMap((candidate) => collectMessagesFromValue(candidate, channelId)).filter((message) => !isSyntheticDeletedMessage(message)),
+    );
+}
+
+function dispatchSyntheticLoadBatch(channelId?: string): boolean {
+    if (!channelId || !shouldReinjectDeletedMessages()) return false;
+
+    const loadedMessages = getLoadedChannelMessages(channelId);
+    if (!loadedMessages.length) return false;
+
+    const existingIds = new Set(loadedMessages.map((message) => message?.id).filter(Boolean));
+    const syntheticMessages: any[] = [];
+    const records = sortOldestByMessageTime(
+        getKindRecords({ records: readRecords() }, "delete").filter((record) => record.channelId === channelId),
+    );
+
+    for (const record of records) {
+        const key = messageKey(record.channelId, record.messageId);
+        if (existingIds.has(record.messageId)) {
+            injectedDeletedMessages.add(key);
+            continue;
+        }
+
+        const syntheticMessage = createSyntheticDeletedMessage(record);
+        syntheticMessages.push(syntheticMessage);
+        existingIds.add(record.messageId);
+        injectedDeletedMessages.add(key);
+        rememberMessage(syntheticMessage, record.channelId);
+    }
+
+    if (!syntheticMessages.length) return false;
+
+    const messages = sortMessagesLikeBatch([...loadedMessages, ...syntheticMessages], loadedMessages);
+    const event = {
+        type: "LOAD_MESSAGES_SUCCESS",
+        channelId,
+        messages,
+        isBefore: false,
+        isAfter: false,
+        hasMoreBefore: false,
+        hasMoreAfter: false,
+        jump: false,
+        optimistic: false,
+        otherPluginBypass: true,
+    };
+
+    handledDispatchEvents.add(event);
+    FluxDispatcher.dispatch(event);
+    return true;
+}
+
+function scheduleSyntheticLoadBatch(channelId?: string, delay = 650) {
+    if (!channelId || pendingSyntheticLoadChannels.has(channelId)) return;
+
+    const attempts = syntheticLoadAttempts.get(channelId) ?? 0;
+    if (attempts >= MAX_SYNTHETIC_LOAD_ATTEMPTS) return;
+
+    pendingSyntheticLoadChannels.add(channelId);
+    const timeout = setTimeout(() => {
+        pendingSyntheticLoadChannels.delete(channelId);
+        syntheticLoadAttempts.set(channelId, attempts + 1);
+
+        if (dispatchSyntheticLoadBatch(channelId)) {
+            syntheticLoadAttempts.delete(channelId);
+        }
+    }, delay);
+
+    syntheticLoadTimeouts.push(timeout);
+}
+
+function scheduleKnownDeletedRecordChannels(delay = 650) {
+    for (const record of getKindRecords({ records: readRecords() }, "delete")) {
+        if (getChannelMessageCache(record.channelId)) scheduleSyntheticLoadBatch(record.channelId, delay);
+    }
+}
+
+function startSyntheticLoadBatchLoop() {
+    scheduleSyntheticLoadBatch(getSelectedChannelId(), 400);
+    scheduleKnownDeletedRecordChannels(750);
+
+    syntheticLoadInterval = setInterval(() => {
+        scheduleSyntheticLoadBatch(getSelectedChannelId(), 500);
+        scheduleKnownDeletedRecordChannels(750);
+    }, 2500);
+}
+
 function recordUpdate(event: any) {
     const settingsValue = normalizeSettings(storage.settings);
     const next = snapshotMessage(event.message, event.channelId);
@@ -347,6 +503,8 @@ function handleDispatchEvent(event: any) {
     injectDeletedRecordsIntoMessageBatch(event);
     if (event.message) rememberMessage(event.message, event.channelId);
     rememberMessages(event.messages, event.channelId);
+    scheduleSyntheticLoadBatch(event.channelId ?? event.message?.channel_id ?? getSelectedChannelId());
+    scheduleKnownDeletedRecordChannels();
 }
 
 function patchFluxDispatcher() {
@@ -429,6 +587,7 @@ export default {
         ensureStorage();
         patchFluxDispatcher();
         patchActionSheet();
+        startSyntheticLoadBatchLoop();
     },
     onUnload() {
         while (unpatches.length) {
@@ -444,6 +603,13 @@ export default {
         messageCache.clear();
         injectedDeletedMessages.clear();
         recentlyPreservedDeletes.clear();
+        pendingSyntheticLoadChannels.clear();
+        syntheticLoadAttempts.clear();
+        while (syntheticLoadTimeouts.length) clearTimeout(syntheticLoadTimeouts.pop());
+        if (syntheticLoadInterval) {
+            clearInterval(syntheticLoadInterval);
+            syntheticLoadInterval = undefined;
+        }
     },
     settings,
 };
