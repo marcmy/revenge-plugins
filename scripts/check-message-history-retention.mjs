@@ -1,10 +1,19 @@
-import { addRecord, createRecord, getKindRecords, getMessageRecords, pruneRecords } from "../.codex-tmp/MessageHistory/history.mjs";
+import {
+  addRecord,
+  createRecord,
+  createSyntheticDeletedMessage,
+  getKindRecords,
+  getMessageRecords,
+  normalizeSettings,
+  pruneRecords,
+} from "../.codex-tmp/MessageHistory/history.mjs";
 import { cycleNumericSetting, nextOptionValue, selectNumericSetting } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
 
 const settings = {
   logEdits: true,
   logDeletes: true,
   persistHistory: true,
+  showDeletedInChannelsAfterRestart: false,
   maxTotalRecords: 200,
   maxRecordsPerChannel: 50,
   maxRecordsPerMessage: 10,
@@ -68,6 +77,20 @@ state = addRecord(state, createRecord("delete", { ...base, id: "deleted-message"
 const deleteRecords = getKindRecords(state, "delete");
 if (deleteRecords.length !== 1 || deleteRecords[0].messageId !== "deleted-message") {
   throw new Error("Expected persisted delete records to be retrievable separately");
+}
+
+if (normalizeSettings({}).showDeletedInChannelsAfterRestart !== false) {
+  throw new Error("Expected channel reinjection to default off");
+}
+
+const syntheticDelete = createSyntheticDeletedMessage(deleteRecords[0]);
+if (
+  syntheticDelete.id !== "deleted-message" ||
+  syntheticDelete.channel_id !== "channel-1" ||
+  syntheticDelete.content !== "[deleted] gone" ||
+  syntheticDelete.author.id !== "user-1"
+) {
+  throw new Error("Expected synthetic deleted message to preserve record identity and content");
 }
 
 console.log("message history retention ok");

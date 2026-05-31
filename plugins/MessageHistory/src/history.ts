@@ -4,6 +4,7 @@ export const DEFAULT_SETTINGS: MessageHistorySettings = {
     logEdits: true,
     logDeletes: true,
     persistHistory: false,
+    showDeletedInChannelsAfterRestart: false,
     maxTotalRecords: 200,
     maxRecordsPerChannel: 50,
     maxRecordsPerMessage: 10,
@@ -17,6 +18,7 @@ export function normalizeSettings(input?: Partial<MessageHistorySettings>): Mess
         logEdits: settings.logEdits !== false,
         logDeletes: settings.logDeletes !== false,
         persistHistory: settings.persistHistory === true,
+        showDeletedInChannelsAfterRestart: settings.showDeletedInChannelsAfterRestart === true,
         maxTotalRecords: clampPositiveInteger(settings.maxTotalRecords, DEFAULT_SETTINGS.maxTotalRecords),
         maxRecordsPerChannel: clampPositiveInteger(settings.maxRecordsPerChannel, DEFAULT_SETTINGS.maxRecordsPerChannel),
         maxRecordsPerMessage: clampPositiveInteger(settings.maxRecordsPerMessage, DEFAULT_SETTINGS.maxRecordsPerMessage),
@@ -84,6 +86,28 @@ export function getMessageRecords(state: HistoryState, channelId: string, messag
     return sortNewestFirst(state.records ?? []).filter(
         (record) => record.channelId === channelId && record.messageId === messageId,
     );
+}
+
+export function createSyntheticDeletedMessage(record: HistoryRecord): any {
+    const timestamp = new Date(record.timestamp).toISOString();
+
+    return {
+        id: record.messageId,
+        channel_id: record.channelId,
+        guild_id: record.guildId ?? null,
+        content: record.content ? `[deleted] ${record.content}` : "[deleted]",
+        attachments: Array.isArray(record.attachments) ? record.attachments : [],
+        embeds: Array.isArray(record.embeds) ? record.embeds : [],
+        flags: 64,
+        type: 0,
+        timestamp,
+        edited_timestamp: null,
+        author: {
+            id: record.authorId ?? "0",
+            username: record.authorUsername ?? "Unknown User",
+        },
+        message_reference: null,
+    };
 }
 
 export function getKindRecords(state: HistoryState, kind: HistoryRecord["kind"]): HistoryRecord[] {
