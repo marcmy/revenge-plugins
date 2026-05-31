@@ -4,6 +4,7 @@ import { showConfirmationAlert } from "@vendetta/ui/alerts";
 import { ErrorBoundary, Forms } from "@vendetta/ui/components";
 import { getAssetIDByName } from "@vendetta/ui/assets";
 
+import { clearReinjectDebugEvents, readReinjectDebugEvents, showReinjectDebugModal } from "./debug";
 import { getKindRecords, normalizeSettings } from "./history";
 import { selectNumericSetting, SETTING_OPTIONS, type NumericSetting } from "./settingsOptions";
 import type { HistoryRecord, MessageHistorySettings } from "./types";
@@ -15,6 +16,10 @@ function readSettings(): MessageHistorySettings {
 
 function readRecordCount(): number {
     return Array.isArray(storage.historyRecords) ? storage.historyRecords.length : 0;
+}
+
+function readDebugEventCount(): number {
+    return readReinjectDebugEvents().length;
 }
 
 function readRecords(): HistoryRecord[] {
@@ -33,6 +38,19 @@ function clearHistory(onCleared: () => void) {
         cancelText: "Cancel",
         onConfirm: () => {
             storage.historyRecords = [];
+            onCleared();
+        },
+    });
+}
+
+function clearReinjectDebugLog(onCleared: () => void) {
+    showConfirmationAlert({
+        title: "Clear Reinject Debug Log",
+        content: "Remove all saved reinjection debug events?",
+        confirmText: "Clear",
+        cancelText: "Cancel",
+        onConfirm: () => {
+            clearReinjectDebugEvents();
             onCleared();
         },
     });
@@ -89,12 +107,14 @@ function OptionPickerContent({
 export default function Settings() {
     const [settings, setSettings] = React.useState(readSettings);
     const [recordCount, setRecordCount] = React.useState(readRecordCount);
+    const [debugEventCount, setDebugEventCount] = React.useState(readDebugEventCount);
 
     const updateSettings = React.useCallback((patch: Partial<MessageHistorySettings>) => {
         const nextSettings = normalizeSettings({ ...settings, ...patch });
         persistSettings(nextSettings);
         setSettings(nextSettings);
         setRecordCount(readRecordCount());
+        setDebugEventCount(readDebugEventCount());
     }, [settings]);
 
     const selectNumber = React.useCallback((key: NumericSetting, value: number) => {
@@ -102,6 +122,7 @@ export default function Settings() {
         persistSettings(nextSettings);
         setSettings(nextSettings);
         setRecordCount(readRecordCount());
+        setDebugEventCount(readDebugEventCount());
     }, [settings]);
 
     const showOptionPicker = React.useCallback((key: NumericSetting) => {
@@ -145,6 +166,12 @@ export default function Settings() {
                     value={settings.showDeletedInChannelsAfterRestart}
                     onValueChange={(value) => updateSettings({ showDeletedInChannelsAfterRestart: value })}
                 />
+                <Forms.FormSwitchRow
+                    label="Debug reinjection"
+                    subLabel="Record message-load event shapes for troubleshooting restart reinjection"
+                    value={settings.debugReinject}
+                    onValueChange={(value) => updateSettings({ debugReinject: value })}
+                />
                 <Forms.FormRow
                     label="Max total records"
                     subLabel={`${settings.maxTotalRecords} saved records. Tap to choose.`}
@@ -180,6 +207,20 @@ export default function Settings() {
                     subLabel={`${deletedRecords.length} saved deleted messages`}
                     trailing={arrow()}
                     onPress={() => showHistoryModal(deletedRecords, "Deleted Messages")}
+                />
+                <Forms.FormRow
+                    label="Browse reinject debug log"
+                    subLabel={`${debugEventCount} captured events`}
+                    trailing={arrow()}
+                    onPress={() => {
+                        setDebugEventCount(readDebugEventCount());
+                        showReinjectDebugModal();
+                    }}
+                />
+                <Forms.FormRow
+                    label="Clear reinject debug log"
+                    subLabel={`${debugEventCount} captured events`}
+                    onPress={() => clearReinjectDebugLog(() => setDebugEventCount(0))}
                 />
                 <Forms.FormRow
                     label="Clear all history"
