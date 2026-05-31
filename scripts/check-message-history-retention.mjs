@@ -1,5 +1,5 @@
-import { addRecord, createRecord, getMessageRecords, pruneRecords } from "../.codex-tmp/MessageHistory/history.mjs";
-import { cycleNumericSetting, nextOptionValue } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
+import { addRecord, createRecord, getKindRecords, getMessageRecords, pruneRecords } from "../.codex-tmp/MessageHistory/history.mjs";
+import { cycleNumericSetting, nextOptionValue, selectNumericSetting } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
 
 const settings = {
   logEdits: true,
@@ -57,6 +57,17 @@ const displayedSettings = {
 const cycledSettings = cycleNumericSetting(displayedSettings, "maxAgeDays");
 if (cycledSettings.maxAgeDays !== 7 || displayedSettings.maxAgeDays !== 3) {
   throw new Error("Expected numeric setting cycle to return a new visible settings object");
+}
+
+const selectedSettings = selectNumericSetting(displayedSettings, "maxAgeDays", 14);
+if (selectedSettings.maxAgeDays !== 14 || displayedSettings.maxAgeDays !== 3) {
+  throw new Error("Expected explicit numeric selection to return a new visible settings object");
+}
+
+state = addRecord(state, createRecord("delete", { ...base, id: "deleted-message", content: "gone" }, 2_000), settings, 2_000);
+const deleteRecords = getKindRecords(state, "delete");
+if (deleteRecords.length !== 1 || deleteRecords[0].messageId !== "deleted-message") {
+  throw new Error("Expected persisted delete records to be retrievable separately");
 }
 
 console.log("message history retention ok");

@@ -20,3 +20,17 @@ export function cycleNumericSetting<T extends Record<NumericSetting, number>>(se
         [key]: nextOptionValue(key, settings[key]),
     };
 }
+
+export function selectNumericSetting<T extends Record<NumericSetting, number>>(
+    settings: T,
+    key: NumericSetting,
+    value: number,
+): T {
+    const options = SETTING_OPTIONS[key];
+    const selected = options.includes(value) ? value : settings[key];
+
+    return {
+        ...settings,
+        [key]: selected,
+    };
+}

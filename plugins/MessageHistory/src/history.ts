@@ -86,6 +86,10 @@ export function getMessageRecords(state: HistoryState, channelId: string, messag
     );
 }
 
+export function getKindRecords(state: HistoryState, kind: HistoryRecord["kind"]): HistoryRecord[] {
+    return sortNewestFirst(state.records ?? []).filter((record) => record.kind === kind);
+}
+
 export function clearMessageRecords(state: HistoryState, channelId: string, messageId: string): HistoryState {
     return {
         records: (state.records ?? []).filter(

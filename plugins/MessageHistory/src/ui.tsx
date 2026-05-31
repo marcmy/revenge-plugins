@@ -25,14 +25,18 @@ function HistoryContent({ records }: { records: HistoryRecord[] }) {
         <ReactNative.View style={{ alignSelf: "stretch", width: "100%" }}>
             <ReactNative.ScrollView style={{ alignSelf: "stretch", maxHeight: 520, width: "100%" }}>
                 <Forms.FormSection title="Message History">
-                    {records.map((record) => (
-                        <ReactNative.View key={record.id} style={{ alignSelf: "stretch", width: "100%" }}>
-                            <Forms.FormRow
-                                label={recordTitle(record)}
-                                subLabel={`${formatTime(record.timestamp)}${record.content ? `\n${record.content}` : ""}`}
-                            />
-                        </ReactNative.View>
-                    ))}
+                    {records.length ? (
+                        records.map((record) => (
+                            <ReactNative.View key={record.id} style={{ alignSelf: "stretch", width: "100%" }}>
+                                <Forms.FormRow
+                                    label={recordTitle(record)}
+                                    subLabel={`${formatTime(record.timestamp)}${record.content ? `\n${record.content}` : ""}`}
+                                />
+                            </ReactNative.View>
+                        ))
+                    ) : (
+                        <Forms.FormRow label="No saved records" subLabel="Nothing has been logged yet" />
+                    )}
                 </Forms.FormSection>
                 <ReactNative.View style={{ height: 24 }} />
             </ReactNative.ScrollView>
@@ -40,9 +44,9 @@ function HistoryContent({ records }: { records: HistoryRecord[] }) {
     );
 }
 
-export function showHistoryModal(records: HistoryRecord[]) {
+export function showHistoryModal(records: HistoryRecord[], title = "Message History") {
     showConfirmationAlert({
-        title: "Message History",
+        title,
         content: <HistoryContent records={records} />,
         confirmText: "Close",
         onConfirm: () => {},
