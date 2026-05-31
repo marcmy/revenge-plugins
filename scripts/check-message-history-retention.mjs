@@ -21,6 +21,7 @@ const settings = {
   logDeletes: true,
   persistHistory: true,
   showDeletedInChannelsAfterRestart: false,
+  debugReinject: false,
   maxTotalRecords: 200,
   maxRecordsPerChannel: 50,
   maxRecordsPerMessage: 10,
@@ -88,6 +89,10 @@ if (deleteRecords.length !== 1 || deleteRecords[0].messageId !== "deleted-messag
 
 if (normalizeSettings({}).showDeletedInChannelsAfterRestart !== false) {
   throw new Error("Expected channel reinjection to default off");
+}
+
+if (normalizeSettings({}).debugReinject !== false) {
+  throw new Error("Expected reinject debugging to default off");
 }
 
 const syntheticDelete = createSyntheticDeletedMessage(deleteRecords[0]);
