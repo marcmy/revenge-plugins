@@ -7,14 +7,17 @@ import { findInReactTree } from "@vendetta/utils";
 
 import {
     addRecord,
+    clearMessageKindRecords,
     clearMessageRecords,
     createSyntheticDeletedCreateEvent,
+    createSyntheticDeletedMessage,
     createRecord,
     getKindRecords,
     getMessageRecords,
     hasVisibleContent,
     normalizeSettings,
     pruneRecords,
+    sortOldestByMessageTime,
 } from "./history";
 import settings from "./settings";
 import type { HistoryRecord, MessageSnapshot } from "./types";
@@ -72,6 +75,29 @@ function safePushUnpatch(register: () => (() => void) | void) {
 
 function messageKey(channelId: string, messageId: string) {
     return `${channelId}:${messageId}`;
+}
+
+function getEventChannelId(event: any): string | undefined {
+    return event?.channelId ?? event?.message?.channel_id ?? event?.message?.channelId;
+}
+
+function getEventMessageId(event: any): string | undefined {
+    return event?.id ?? event?.message?.id;
+}
+
+function looksLikeSyntheticDeletedMessage(message: any): boolean {
+    if (!message) return false;
+    if (message.message_history_synthetic_deleted === true) return true;
+
+    const flags = Number(message.flags ?? 0);
+    const content = typeof message.content === "string" ? message.content : "";
+    return (flags & 64) === 64 && content.startsWith("[deleted]");
+}
+
+function hasSavedDeleteRecord(channelId: string, messageId: string): boolean {
+    return readRecords().some(
+        (record) => record.kind === "delete" && record.channelId === channelId && record.messageId === messageId,
+    );
 }
 
 function snapshotMessage(message: any, fallbackChannelId?: string): MessageSnapshot | null {
@@ -148,13 +174,108 @@ function hasStoredMessage(channelId: string, messageId: string) {
     }
 }
 
+function consumeSyntheticDeletedDismiss(event: any): boolean {
+    const channelId = getEventChannelId(event);
+    const messageId = getEventMessageId(event);
+    if (!channelId || !messageId) return false;
+
+    const key = messageKey(channelId, messageId);
+    const storedMessage = getCachedOrStoredMessage(channelId, messageId) ?? event.message;
+    const trackedSyntheticMessage = injectedDeletedMessages.has(key) || looksLikeSyntheticDeletedMessage(storedMessage);
+    if (!trackedSyntheticMessage || !hasSavedDeleteRecord(channelId, messageId)) return false;
+
+    writeRecords(clearMessageKindRecords({ records: readRecords() }, channelId, messageId, "delete").records);
+    injectedDeletedMessages.delete(key);
+    reinjectAttempts.delete(key);
+    messageCache.delete(key);
+    return true;
+}
+
+function isMessageBatchEvent(event: any): boolean {
+    return (
+        typeof event?.type === "string" &&
+        event.type.includes("LOAD") &&
+        event.type.includes("MESSAGE") &&
+        Array.isArray(event.messages)
+    );
+}
+
+function getMessageLikeTimestamp(message: any): number {
+    const timestamp = message?.timestamp ?? message?.edited_timestamp;
+    if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+    if (typeof timestamp === "string") {
+        const parsedDate = Date.parse(timestamp);
+        if (Number.isFinite(parsedDate)) return parsedDate;
+
+        const parsedNumber = Number(timestamp);
+        if (Number.isFinite(parsedNumber)) return parsedNumber;
+    }
+
+    return timestampFromSnowflake(message?.id) ?? 0;
+}
+
+function timestampFromSnowflake(id: string | undefined): number | undefined {
+    if (!id || !/^\d+$/.test(id)) return undefined;
+
+    const snowflake = Number(id);
+    if (!Number.isFinite(snowflake) || snowflake <= 0) return undefined;
+
+    const timestamp = Math.floor(snowflake / 4_194_304) + 1_420_070_400_000;
+    return Number.isFinite(timestamp) && timestamp > 1_420_070_400_000 ? timestamp : undefined;
+}
+
+function sortMessagesLikeBatch(messages: any[], referenceMessages: any[]): any[] {
+    const first = getMessageLikeTimestamp(referenceMessages[0]);
+    const last = getMessageLikeTimestamp(referenceMessages[referenceMessages.length - 1]);
+    const descending = first > 0 && last > 0 && first > last;
+
+    return [...messages].sort((a, b) => {
+        const delta = getMessageLikeTimestamp(a) - getMessageLikeTimestamp(b);
+        return descending ? -delta : delta;
+    });
+}
+
+function injectDeletedRecordsIntoMessageBatch(event: any) {
+    if (!isMessageBatchEvent(event) || !shouldReinjectDeletedMessages()) return;
+
+    // Load batches are the only dispatcher path that can place historical rows near their original timestamp.
+    const firstMessageWithChannel = event.messages.find((message: any) => message?.channel_id ?? message?.channelId);
+    const channelId = getEventChannelId(event) ?? firstMessageWithChannel?.channel_id ?? firstMessageWithChannel?.channelId;
+    if (!channelId) return;
+
+    const existingIds = new Set(event.messages.map((message: any) => message?.id).filter(Boolean));
+    const syntheticMessages: any[] = [];
+    const records = sortOldestByMessageTime(
+        getKindRecords({ records: readRecords() }, "delete").filter((record) => record.channelId === channelId),
+    );
+
+    for (const record of records) {
+        const key = messageKey(record.channelId, record.messageId);
+        if (injectedDeletedMessages.has(key) || existingIds.has(record.messageId) || hasStoredMessage(record.channelId, record.messageId)) {
+            if (existingIds.has(record.messageId) || hasStoredMessage(record.channelId, record.messageId)) injectedDeletedMessages.add(key);
+            reinjectAttempts.delete(key);
+            continue;
+        }
+
+        const syntheticMessage = createSyntheticDeletedMessage(record);
+        syntheticMessages.push(syntheticMessage);
+        existingIds.add(record.messageId);
+        injectedDeletedMessages.add(key);
+        reinjectAttempts.delete(key);
+        rememberMessage(syntheticMessage, record.channelId);
+    }
+
+    if (!syntheticMessages.length) return;
+    event.messages = sortMessagesLikeBatch([...event.messages, ...syntheticMessages], event.messages);
+}
+
 function reinjectDeletedMessagesForChannel(channelId?: string) {
     if (!channelId || !shouldReinjectDeletedMessages()) return;
     if (!getChannelMessageCache(channelId)) return;
 
-    const records = getKindRecords({ records: readRecords() }, "delete")
-        .filter((record) => record.channelId === channelId)
-        .reverse();
+    const records = sortOldestByMessageTime(
+        getKindRecords({ records: readRecords() }, "delete").filter((record) => record.channelId === channelId),
+    );
 
     for (const record of records) {
         const key = messageKey(record.channelId, record.messageId);
@@ -248,23 +369,29 @@ function recordUpdate(event: any) {
 }
 
 function recordDelete(event: any) {
+    if (consumeSyntheticDeletedDismiss(event)) return;
+
     const settingsValue = normalizeSettings(storage.settings);
     if (!settingsValue.logDeletes || event.otherPluginBypass || !event.channelId || !event.id) return;
 
     const original = getCachedOrStoredMessage(event.channelId, event.id);
+    if (looksLikeSyntheticDeletedMessage(original)) return;
+
     const snapshot = snapshotMessage(original, event.channelId);
     if (!snapshot) return;
 
-    saveRecord(createRecord("delete", snapshot));
-
     const guildId = ChannelStore?.getChannel?.(snapshot.channelId)?.guild_id ?? snapshot.guildId ?? null;
+    const record = createRecord("delete", { ...snapshot, guildId });
+    saveRecord(record);
+
+    const key = messageKey(snapshot.channelId, snapshot.id);
+    injectedDeletedMessages.add(key);
+    reinjectAttempts.delete(key);
+
     event.message = {
         ...original,
-        content: original?.content ? `[deleted] ${original.content}` : "[deleted]",
-        channel_id: snapshot.channelId,
-        guild_id: guildId,
+        ...createSyntheticDeletedMessage(record),
         message_reference: original?.message_reference ?? original?.messageReference ?? null,
-        flags: 64,
     };
     event.type = "MESSAGE_UPDATE";
     event.channelId = snapshot.channelId;
@@ -292,6 +419,7 @@ function patchFluxDispatcher() {
                     return args;
                 }
 
+                injectDeletedRecordsIntoMessageBatch(event);
                 if (event.message) rememberMessage(event.message, event.channelId);
                 rememberMessages(event.messages, event.channelId);
                 scheduleDeletedMessageReinject(event.channelId ?? event.message?.channel_id ?? getSelectedChannelId());

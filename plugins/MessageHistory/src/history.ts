@@ -27,6 +27,8 @@ export function normalizeSettings(input?: Partial<MessageHistorySettings>): Mess
 }
 
 export function createRecord(kind: HistoryRecord["kind"], snapshot: MessageSnapshot, now = Date.now()): HistoryRecord {
+    const messageTimestamp = parseMessageTimestamp(snapshot.timestamp) ?? timestampFromSnowflake(snapshot.id) ?? now;
+
     return {
         id: `${kind}:${snapshot.channelId}:${snapshot.id}:${now}`,
         kind,
@@ -39,6 +41,7 @@ export function createRecord(kind: HistoryRecord["kind"], snapshot: MessageSnaps
         attachments: Array.isArray(snapshot.attachments) ? snapshot.attachments : [],
         embeds: Array.isArray(snapshot.embeds) ? snapshot.embeds : [],
         timestamp: now,
+        messageTimestamp,
     };
 }
 
@@ -89,13 +92,13 @@ export function getMessageRecords(state: HistoryState, channelId: string, messag
 }
 
 export function createSyntheticDeletedMessage(record: HistoryRecord): any {
-    const timestamp = new Date(record.timestamp).toISOString();
+    const timestamp = new Date(getRecordMessageTimestamp(record)).toISOString();
 
     return {
         id: record.messageId,
         channel_id: record.channelId,
         guild_id: record.guildId ?? null,
-        content: record.content ? `[deleted] ${record.content}` : "[deleted]",
+        content: formatDeletedContent(record.content),
         attachments: Array.isArray(record.attachments) ? record.attachments : [],
         embeds: Array.isArray(record.embeds) ? record.embeds : [],
         flags: 64,
@@ -107,6 +110,7 @@ export function createSyntheticDeletedMessage(record: HistoryRecord): any {
             username: record.authorUsername ?? "Unknown User",
         },
         message_reference: null,
+        message_history_synthetic_deleted: true,
     };
 }
 
@@ -124,6 +128,19 @@ export function createSyntheticDeletedCreateEvent(record: HistoryRecord): any {
 
 export function getKindRecords(state: HistoryState, kind: HistoryRecord["kind"]): HistoryRecord[] {
     return sortNewestFirst(state.records ?? []).filter((record) => record.kind === kind);
+}
+
+export function clearMessageKindRecords(
+    state: HistoryState,
+    channelId: string,
+    messageId: string,
+    kind: HistoryRecord["kind"],
+): HistoryState {
+    return {
+        records: (state.records ?? []).filter(
+            (record) => record.kind !== kind || record.channelId !== channelId || record.messageId !== messageId,
+        ),
+    };
 }
 
 export function clearMessageRecords(state: HistoryState, channelId: string, messageId: string): HistoryState {
@@ -144,6 +161,20 @@ export function hasVisibleContent(snapshot: Pick<MessageSnapshot, "content" | "a
     return Boolean(snapshot.content || snapshot.attachments?.length || snapshot.embeds?.length);
 }
 
+export function getRecordMessageTimestamp(record: HistoryRecord): number {
+    const storedTimestamp = Number(record.messageTimestamp);
+    if (Number.isFinite(storedTimestamp) && storedTimestamp > 0) return storedTimestamp;
+
+    return timestampFromSnowflake(record.messageId) ?? record.timestamp;
+}
+
+export function sortOldestByMessageTime(records: HistoryRecord[]): HistoryRecord[] {
+    return [...records].sort((a, b) => {
+        const timeDelta = getRecordMessageTimestamp(a) - getRecordMessageTimestamp(b);
+        return timeDelta || a.timestamp - b.timestamp;
+    });
+}
+
 function clampPositiveInteger(value: unknown, fallback: number): number {
     const number = Math.floor(Number(value));
     return Number.isFinite(number) && number > 0 ? number : fallback;
@@ -155,4 +186,30 @@ function messageKey(channelId: string, messageId: string): string {
 
 function sortNewestFirst(records: HistoryRecord[]): HistoryRecord[] {
     return [...records].sort((a, b) => b.timestamp - a.timestamp);
+}
+
+function formatDeletedContent(content: string): string {
+    if (!content) return "[deleted]";
+    return content.startsWith("[deleted]") ? content : `[deleted] ${content}`;
+}
+
+function parseMessageTimestamp(value: MessageSnapshot["timestamp"]): number | undefined {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value !== "string") return undefined;
+
+    const parsedDate = Date.parse(value);
+    if (Number.isFinite(parsedDate)) return parsedDate;
+
+    const parsedNumber = Number(value);
+    return Number.isFinite(parsedNumber) ? parsedNumber : undefined;
+}
+
+function timestampFromSnowflake(id: string): number | undefined {
+    if (!/^\d+$/.test(id)) return undefined;
+
+    const snowflake = Number(id);
+    if (!Number.isFinite(snowflake) || snowflake <= 0) return undefined;
+
+    const timestamp = Math.floor(snowflake / 4_194_304) + 1_420_070_400_000;
+    return Number.isFinite(timestamp) && timestamp > 1_420_070_400_000 ? timestamp : undefined;
 }
