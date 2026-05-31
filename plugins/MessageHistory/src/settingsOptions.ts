@@ -13,3 +13,10 @@ export function nextOptionValue(key: NumericSetting, current: number): number {
     if (index < 0) return options[0];
     return options[(index + 1) % options.length];
 }
+
+export function cycleNumericSetting<T extends Record<NumericSetting, number>>(settings: T, key: NumericSetting): T {
+    return {
+        ...settings,
+        [key]: nextOptionValue(key, settings[key]),
+    };
+}
