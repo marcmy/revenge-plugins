@@ -1,6 +1,7 @@
 import {
   addRecord,
   createRecord,
+  createSyntheticDeletedCreateEvent,
   createSyntheticDeletedMessage,
   getKindRecords,
   getMessageRecords,
@@ -91,6 +92,16 @@ if (
   syntheticDelete.author.id !== "user-1"
 ) {
   throw new Error("Expected synthetic deleted message to preserve record identity and content");
+}
+
+const syntheticCreateEvent = createSyntheticDeletedCreateEvent(deleteRecords[0]);
+if (
+  syntheticCreateEvent.type !== "MESSAGE_CREATE" ||
+  syntheticCreateEvent.channelId !== "channel-1" ||
+  syntheticCreateEvent.message.id !== "deleted-message" ||
+  syntheticCreateEvent.otherPluginBypass !== true
+) {
+  throw new Error("Expected synthetic deleted record to create a guarded MESSAGE_CREATE event");
 }
 
 console.log("message history retention ok");

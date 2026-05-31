@@ -110,6 +110,18 @@ export function createSyntheticDeletedMessage(record: HistoryRecord): any {
     };
 }
 
+export function createSyntheticDeletedCreateEvent(record: HistoryRecord): any {
+    return {
+        type: "MESSAGE_CREATE",
+        channelId: record.channelId,
+        message: createSyntheticDeletedMessage(record),
+        optimistic: false,
+        sendMessageOptions: {},
+        isPushNotification: false,
+        otherPluginBypass: true,
+    };
+}
+
 export function getKindRecords(state: HistoryState, kind: HistoryRecord["kind"]): HistoryRecord[] {
     return sortNewestFirst(state.records ?? []).filter((record) => record.kind === kind);
 }
