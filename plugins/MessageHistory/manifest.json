@@ -1,0 +1,14 @@
+{
+  "name": "MessageHistory",
+  "description": "Logs edited and deleted messages without exposing edit history in message content.",
+  "authors": [
+    {
+      "name": "marcmy",
+      "id": "92076581404545024"
+    }
+  ],
+  "main": "src/index.ts",
+  "vendetta": {
+    "icon": "ic_history_24px"
+  }
+}
