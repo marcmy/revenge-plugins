@@ -1,7 +1,7 @@
 import { findByProps } from "@vendetta/metro";
 import { ReactNative } from "@vendetta/metro/common";
 import { getAssetIDByName } from "@vendetta/ui/assets";
-import { showCustomAlert } from "@vendetta/ui/alerts";
+import { showConfirmationAlert } from "@vendetta/ui/alerts";
 import { Forms } from "@vendetta/ui/components";
 
 import type { HistoryRecord } from "./types";
@@ -20,7 +20,7 @@ function recordTitle(record: HistoryRecord): string {
     return record.kind === "delete" ? "Deleted message" : "Previous edit";
 }
 
-function HistoryModal({ records }: { records: HistoryRecord[] }) {
+function HistoryContent({ records }: { records: HistoryRecord[] }) {
     return (
         <ReactNative.ScrollView style={{ maxHeight: 520 }}>
             <Forms.FormSection title="Message History">
@@ -38,7 +38,13 @@ function HistoryModal({ records }: { records: HistoryRecord[] }) {
 }
 
 export function showHistoryModal(records: HistoryRecord[]) {
-    showCustomAlert(() => <HistoryModal records={records} />, {});
+    showConfirmationAlert({
+        title: "Message History",
+        content: <HistoryContent records={records} />,
+        confirmText: "Close",
+        onConfirm: () => {},
+        isDismissable: true,
+    });
 }
 
 export function createActionSheetRow(label: string, subLabel: string, onPress: () => void) {

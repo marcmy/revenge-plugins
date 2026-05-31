@@ -1,19 +1,15 @@
 import { ReactNative } from "@vendetta/metro/common";
 import { storage } from "@vendetta/plugin";
 import { useProxy } from "@vendetta/storage";
-import { showConfirmationAlert, showInputAlert } from "@vendetta/ui/alerts";
+import { showConfirmationAlert } from "@vendetta/ui/alerts";
 import { ErrorBoundary, Forms } from "@vendetta/ui/components";
 
-import { DEFAULT_SETTINGS, normalizeSettings, pruneRecords } from "./history";
+import { normalizeSettings, pruneRecords } from "./history";
+import { nextOptionValue, type NumericSetting } from "./settingsOptions";
 import type { MessageHistorySettings } from "./types";
 
-type NumericSetting = "maxTotalRecords" | "maxRecordsPerChannel" | "maxRecordsPerMessage" | "maxAgeDays";
-
 function readSettings(): MessageHistorySettings {
-    const settings = normalizeSettings(storage.settings);
-    storage.settings = settings;
-    storage.historyRecords = pruneRecords(Array.isArray(storage.historyRecords) ? storage.historyRecords : [], settings);
-    return settings;
+    return normalizeSettings(storage.settings);
 }
 
 function writeSettings(settings: Partial<MessageHistorySettings>) {
@@ -22,18 +18,9 @@ function writeSettings(settings: Partial<MessageHistorySettings>) {
     storage.historyRecords = pruneRecords(Array.isArray(storage.historyRecords) ? storage.historyRecords : [], nextSettings);
 }
 
-function setNumber(key: NumericSetting, title: string) {
+function cycleNumber(key: NumericSetting) {
     const settings = readSettings();
-
-    showInputAlert({
-        title,
-        placeholder: String(DEFAULT_SETTINGS[key]),
-        initialValue: String(settings[key]),
-        confirmText: "Save",
-        onConfirm: (value) => {
-            writeSettings({ [key]: Number(value) });
-        },
-    });
+    writeSettings({ [key]: nextOptionValue(key, settings[key]) });
 }
 
 function clearHistory() {
@@ -77,23 +64,23 @@ export default function Settings() {
                 />
                 <Forms.FormRow
                     label="Max total records"
-                    subLabel={String(settings.maxTotalRecords)}
-                    onPress={() => setNumber("maxTotalRecords", "Max total records")}
+                    subLabel={`${settings.maxTotalRecords} saved records. Tap to change.`}
+                    onPress={() => cycleNumber("maxTotalRecords")}
                 />
                 <Forms.FormRow
                     label="Max records per channel"
-                    subLabel={String(settings.maxRecordsPerChannel)}
-                    onPress={() => setNumber("maxRecordsPerChannel", "Max records per channel")}
+                    subLabel={`${settings.maxRecordsPerChannel} saved records. Tap to change.`}
+                    onPress={() => cycleNumber("maxRecordsPerChannel")}
                 />
                 <Forms.FormRow
                     label="Max records per message"
-                    subLabel={String(settings.maxRecordsPerMessage)}
-                    onPress={() => setNumber("maxRecordsPerMessage", "Max records per message")}
+                    subLabel={`${settings.maxRecordsPerMessage} saved records. Tap to change.`}
+                    onPress={() => cycleNumber("maxRecordsPerMessage")}
                 />
                 <Forms.FormRow
                     label="Max age in days"
-                    subLabel={String(settings.maxAgeDays)}
-                    onPress={() => setNumber("maxAgeDays", "Max age in days")}
+                    subLabel={`${settings.maxAgeDays} days. Tap to change.`}
+                    onPress={() => cycleNumber("maxAgeDays")}
                 />
                 <Forms.FormRow
                     label="Clear all history"
