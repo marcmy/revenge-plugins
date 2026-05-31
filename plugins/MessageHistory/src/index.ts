@@ -151,14 +151,6 @@ function shouldReinjectDeletedMessages() {
     return settingsValue.logDeletes && settingsValue.showDeletedInChannelsAfterRestart;
 }
 
-function hasStoredMessage(channelId: string, messageId: string) {
-    try {
-        return Boolean(MessageStore?.getMessage?.(channelId, messageId) ?? ChannelMessages?.get?.(channelId)?.get?.(messageId));
-    } catch {
-        return false;
-    }
-}
-
 function consumeSyntheticDeletedDismiss(event: any): boolean {
     const { channelId, messageId } = getEventMessageIdentity(event);
     if (!channelId || !messageId) return false;
@@ -245,15 +237,14 @@ function injectDeletedRecordsIntoMessageBatch(event: any) {
     for (const record of records) {
         const key = messageKey(record.channelId, record.messageId);
         const alreadyInBatch = existingIds.has(record.messageId);
-        const alreadyStored = hasStoredMessage(record.channelId, record.messageId);
 
-        if (alreadyInBatch || alreadyStored) {
+        if (alreadyInBatch) {
             injectedDeletedMessages.add(key);
             continue;
         }
 
-        // Do not skip only because this set remembers an earlier reinjection. Mobile can briefly render
-        // a row, replace the loaded list, and then need the same deleted row injected into a later batch.
+        // Only the incoming batch should suppress reinjection. A previous local/cache injection can be
+        // overwritten by a later real LOAD_MESSAGES_SUCCESS, so store presence is not reliable here.
         injectedDeletedMessages.delete(key);
 
         const syntheticMessage = createSyntheticDeletedMessage(record);
