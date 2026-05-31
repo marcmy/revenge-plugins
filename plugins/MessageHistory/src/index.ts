@@ -5,6 +5,7 @@ import { storage } from "@vendetta/plugin";
 import { showToast } from "@vendetta/ui/toasts";
 import { findInReactTree } from "@vendetta/utils";
 
+import { recordReinjectDebugEvent } from "./debug";
 import {
     addRecord,
     clearMessageKindRecords,
@@ -45,6 +46,10 @@ function ensureStorage() {
 
     if (!nextSettings.persistHistory) {
         storage.historyRecords = [];
+    }
+
+    if (!Array.isArray(storage.reinjectDebugEvents)) {
+        storage.reinjectDebugEvents = [];
     }
 }
 
@@ -260,6 +265,7 @@ function injectDeletedRecordsIntoMessageBatch(event: any) {
 
     if (!syntheticMessages.length) return;
     event.messages = sortMessagesLikeBatch([...event.messages, ...syntheticMessages], event.messages);
+    recordReinjectDebugEvent("batchInject", event, { injectedDeletes: syntheticMessages.length, recordsForChannel: records.length });
 }
 
 function recordUpdate(event: any) {
@@ -331,8 +337,10 @@ function markDispatchEventHandled(event: any): boolean {
     return false;
 }
 
-function handleDispatchEvent(event: any) {
+function handleDispatchEvent(method: string, event: any) {
     if (!event?.type || markDispatchEventHandled(event)) return;
+
+    recordReinjectDebugEvent(method, event);
 
     if (event.type === "MESSAGE_DELETE") {
         recordDelete(event);
@@ -357,7 +365,7 @@ function patchFluxDispatcher() {
         safePushUnpatch(() =>
             before(method, FluxDispatcher, (args: any[]) => {
                 try {
-                    handleDispatchEvent(args[0]);
+                    handleDispatchEvent(method, args[0]);
                 } catch (error) {
                     console.error(`[MessageHistory] ${method} capture failed`, error);
                 }
