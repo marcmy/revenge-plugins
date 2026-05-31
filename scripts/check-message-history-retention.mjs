@@ -1,5 +1,5 @@
 import { addRecord, createRecord, getMessageRecords, pruneRecords } from "../.codex-tmp/MessageHistory/history.mjs";
-import { nextOptionValue } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
+import { cycleNumericSetting, nextOptionValue } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
 
 const settings = {
   logEdits: true,
@@ -46,6 +46,17 @@ if (nextOptionValue("maxAgeDays", 3) !== 7) {
 
 if (nextOptionValue("maxTotalRecords", 999) !== 50) {
   throw new Error("Expected unknown total record value to cycle back to the first preset");
+}
+
+const displayedSettings = {
+  maxTotalRecords: 200,
+  maxRecordsPerChannel: 50,
+  maxRecordsPerMessage: 10,
+  maxAgeDays: 3,
+};
+const cycledSettings = cycleNumericSetting(displayedSettings, "maxAgeDays");
+if (cycledSettings.maxAgeDays !== 7 || displayedSettings.maxAgeDays !== 3) {
+  throw new Error("Expected numeric setting cycle to return a new visible settings object");
 }
 
 console.log("message history retention ok");
