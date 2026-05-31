@@ -4,6 +4,7 @@ export interface MessageHistorySettings {
     logEdits: boolean;
     logDeletes: boolean;
     persistHistory: boolean;
+    showDeletedInChannelsAfterRestart: boolean;
     maxTotalRecords: number;
     maxRecordsPerChannel: number;
     maxRecordsPerMessage: number;

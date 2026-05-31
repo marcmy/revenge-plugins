@@ -139,6 +139,12 @@ export default function Settings() {
                     value={settings.persistHistory}
                     onValueChange={(value) => updateSettings({ persistHistory: value })}
                 />
+                <Forms.FormSwitchRow
+                    label="Show saved deletes in channels"
+                    subLabel="After restart, softly restore saved deleted messages in loaded channels"
+                    value={settings.showDeletedInChannelsAfterRestart}
+                    onValueChange={(value) => updateSettings({ showDeletedInChannelsAfterRestart: value })}
+                />
                 <Forms.FormRow
                     label="Max total records"
                     subLabel={`${settings.maxTotalRecords} saved records. Tap to choose.`}

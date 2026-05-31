@@ -1,4 +1,4 @@
-import { findByProps } from "@vendetta/metro";
+import { findByProps, findByStoreName } from "@vendetta/metro";
 import { FluxDispatcher, React } from "@vendetta/metro/common";
 import { after, before } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
@@ -9,6 +9,8 @@ import {
     addRecord,
     clearMessageRecords,
     createRecord,
+    createSyntheticDeletedMessage,
+    getKindRecords,
     getMessageRecords,
     hasVisibleContent,
     normalizeSettings,
@@ -20,11 +22,16 @@ import { createActionSheetRow, showHistoryModal } from "./ui";
 
 const unpatches: Array<() => void> = [];
 const messageCache = new Map<string, MessageSnapshot>();
+const injectedDeletedMessages = new Set<string>();
+const pendingReinjectChannels = new Set<string>();
+const reinjectTimeouts: Array<ReturnType<typeof setTimeout>> = [];
+let reinjectInterval: ReturnType<typeof setInterval> | undefined;
 
 const ActionSheet = findByProps("openLazy", "hideActionSheet");
 const ChannelStore = findByProps("getChannel", "getDMFromUserId");
 const ChannelMessages = findByProps("_channelMessages");
 const MessageStore = findByProps("getMessage", "getMessages");
+const SelectedChannelStore = findByStoreName("SelectedChannelStore");
 
 function ensureStorage() {
     const nextSettings = normalizeSettings(storage.settings);
@@ -110,6 +117,85 @@ function getCachedOrStoredMessage(channelId: string, messageId: string) {
     }
 }
 
+function getSelectedChannelId(): string | undefined {
+    try {
+        return SelectedChannelStore?.getChannelId?.() ?? SelectedChannelStore?.getLastSelectedChannelId?.();
+    } catch {
+        return undefined;
+    }
+}
+
+function shouldReinjectDeletedMessages() {
+    const settingsValue = normalizeSettings(storage.settings);
+    return settingsValue.logDeletes && settingsValue.showDeletedInChannelsAfterRestart;
+}
+
+function getChannelMessageCache(channelId: string) {
+    try {
+        return ChannelMessages?.get?.(channelId);
+    } catch {
+        return null;
+    }
+}
+
+function hasStoredMessage(channelId: string, messageId: string) {
+    try {
+        return Boolean(MessageStore?.getMessage?.(channelId, messageId) ?? ChannelMessages?.get?.(channelId)?.get?.(messageId));
+    } catch {
+        return false;
+    }
+}
+
+function reinjectDeletedMessagesForChannel(channelId?: string) {
+    if (!channelId || !shouldReinjectDeletedMessages()) return;
+    if (!getChannelMessageCache(channelId)) return;
+
+    const records = getKindRecords({ records: readRecords() }, "delete")
+        .filter((record) => record.channelId === channelId)
+        .reverse();
+
+    for (const record of records) {
+        const key = messageKey(record.channelId, record.messageId);
+        if (injectedDeletedMessages.has(key) || hasStoredMessage(record.channelId, record.messageId)) continue;
+
+        const message = createSyntheticDeletedMessage(record);
+        injectedDeletedMessages.add(key);
+
+        try {
+            FluxDispatcher.dispatch({
+                type: "MESSAGE_UPDATE",
+                channelId: record.channelId,
+                message,
+                optimistic: false,
+                sendMessageOptions: {},
+                isPushNotification: false,
+                otherPluginBypass: true,
+            });
+            rememberMessage(message, record.channelId);
+        } catch (error) {
+            injectedDeletedMessages.delete(key);
+            console.error("[MessageHistory] deleted message reinjection failed", error);
+        }
+    }
+}
+
+function scheduleDeletedMessageReinject(channelId?: string) {
+    if (!channelId || pendingReinjectChannels.has(channelId)) return;
+    pendingReinjectChannels.add(channelId);
+
+    const timeout = setTimeout(() => {
+        pendingReinjectChannels.delete(channelId);
+        reinjectDeletedMessagesForChannel(channelId);
+    }, 500);
+
+    reinjectTimeouts.push(timeout);
+}
+
+function startDeletedMessageReinjectLoop() {
+    scheduleDeletedMessageReinject(getSelectedChannelId());
+    reinjectInterval = setInterval(() => scheduleDeletedMessageReinject(getSelectedChannelId()), 2500);
+}
+
 function recordUpdate(event: any) {
     const settingsValue = normalizeSettings(storage.settings);
     const next = snapshotMessage(event.message, event.channelId);
@@ -174,6 +260,7 @@ function patchFluxDispatcher() {
 
                 if (event.message) rememberMessage(event.message, event.channelId);
                 rememberMessages(event.messages, event.channelId);
+                scheduleDeletedMessageReinject(event.channelId ?? event.message?.channel_id ?? getSelectedChannelId());
             } catch (error) {
                 console.error("[MessageHistory] dispatch capture failed", error);
             }
@@ -242,6 +329,7 @@ export default {
         ensureStorage();
         patchFluxDispatcher();
         patchActionSheet();
+        startDeletedMessageReinjectLoop();
     },
     onUnload() {
         while (unpatches.length) {
@@ -255,6 +343,13 @@ export default {
         }
 
         messageCache.clear();
+        injectedDeletedMessages.clear();
+        pendingReinjectChannels.clear();
+        while (reinjectTimeouts.length) clearTimeout(reinjectTimeouts.pop());
+        if (reinjectInterval) {
+            clearInterval(reinjectInterval);
+            reinjectInterval = undefined;
+        }
     },
     settings,
 };
