@@ -1,12 +1,15 @@
 import {
   addRecord,
+  clearMessageKindRecords,
   createRecord,
   createSyntheticDeletedCreateEvent,
   createSyntheticDeletedMessage,
   getKindRecords,
   getMessageRecords,
+  getRecordMessageTimestamp,
   normalizeSettings,
   pruneRecords,
+  sortOldestByMessageTime,
 } from "../.codex-tmp/MessageHistory/history.mjs";
 import { cycleNumericSetting, nextOptionValue, selectNumericSetting } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
 
@@ -94,6 +97,10 @@ if (
   throw new Error("Expected synthetic deleted message to preserve record identity and content");
 }
 
+if (syntheticDelete.message_history_synthetic_deleted !== true) {
+  throw new Error("Expected synthetic deleted message to carry a local marker");
+}
+
 const syntheticCreateEvent = createSyntheticDeletedCreateEvent(deleteRecords[0]);
 if (
   syntheticCreateEvent.type !== "MESSAGE_CREATE" ||
@@ -102,6 +109,59 @@ if (
   syntheticCreateEvent.otherPluginBypass !== true
 ) {
   throw new Error("Expected synthetic deleted record to create a guarded MESSAGE_CREATE event");
+}
+
+const originalMessageTimestamp = "2026-05-31T16:09:00.000Z";
+const deleteLoggedAt = Date.parse("2026-05-31T16:54:00.000Z");
+const timestampedDeleteRecord = createRecord(
+  "delete",
+  {
+    ...base,
+    id: "timestamped-delete",
+    content: "old spot",
+    timestamp: originalMessageTimestamp,
+  },
+  deleteLoggedAt,
+);
+if (timestampedDeleteRecord.messageTimestamp !== Date.parse(originalMessageTimestamp)) {
+  throw new Error("Expected delete records to retain the original message timestamp");
+}
+
+const timestampedSyntheticDelete = createSyntheticDeletedMessage(timestampedDeleteRecord);
+if (timestampedSyntheticDelete.timestamp !== originalMessageTimestamp) {
+  throw new Error("Expected synthetic deleted messages to display at the original message timestamp");
+}
+
+const discordEpoch = 1_420_070_400_000n;
+const snowflakeTimestamp = 1_600_000_000_000n;
+const snowflakeId = String((snowflakeTimestamp - discordEpoch) << 22n);
+if (getRecordMessageTimestamp({ ...deleteRecords[0], messageId: snowflakeId, messageTimestamp: undefined }) !== Number(snowflakeTimestamp)) {
+  throw new Error("Expected missing message timestamps to fall back to the Discord snowflake timestamp");
+}
+
+const olderRecord = createRecord("delete", { ...base, id: "older", timestamp: "2026-05-31T16:00:00.000Z" }, deleteLoggedAt + 2);
+const newerRecord = createRecord("delete", { ...base, id: "newer", timestamp: "2026-05-31T17:00:00.000Z" }, deleteLoggedAt + 1);
+const sortedByMessageTime = sortOldestByMessageTime([newerRecord, olderRecord]);
+if (sortedByMessageTime[0].messageId !== "older" || sortedByMessageTime[1].messageId !== "newer") {
+  throw new Error("Expected reinjected records to sort by original message time from oldest to newest");
+}
+
+const mixedState = {
+  records: [
+    createRecord("edit", { ...base, id: "mixed-message", content: "edit" }, 3_000),
+    createRecord("delete", { ...base, id: "mixed-message", content: "delete" }, 4_000),
+    createRecord("delete", { ...base, id: "other-message", content: "other" }, 5_000),
+  ],
+};
+const deleteClearedState = clearMessageKindRecords(mixedState, "channel-1", "mixed-message", "delete");
+if (getKindRecords(deleteClearedState, "delete").some((record) => record.messageId === "mixed-message")) {
+  throw new Error("Expected dismiss cleanup to remove delete records for the dismissed message");
+}
+if (!getKindRecords(deleteClearedState, "edit").some((record) => record.messageId === "mixed-message")) {
+  throw new Error("Expected dismiss cleanup to keep edit records for the dismissed message");
+}
+if (!getKindRecords(deleteClearedState, "delete").some((record) => record.messageId === "other-message")) {
+  throw new Error("Expected dismiss cleanup to keep other messages' delete records");
 }
 
 console.log("message history retention ok");

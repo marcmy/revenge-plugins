@@ -36,6 +36,7 @@ export interface HistoryRecord {
     attachments: any[];
     embeds: any[];
     timestamp: number;
+    messageTimestamp?: number | null;
 }
 
 export interface HistoryState {
