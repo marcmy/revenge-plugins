@@ -1,4 +1,4 @@
-import { findByProps, findByStoreName } from "@vendetta/metro";
+import { findByProps } from "@vendetta/metro";
 import { FluxDispatcher, React } from "@vendetta/metro/common";
 import { after, before } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
@@ -9,7 +9,6 @@ import {
     addRecord,
     clearMessageKindRecords,
     clearMessageRecords,
-    createSyntheticDeletedCreateEvent,
     createSyntheticDeletedMessage,
     createRecord,
     getEventMessageIdentity,
@@ -29,19 +28,13 @@ import { createActionSheetRow, showHistoryModal } from "./ui";
 const unpatches: Array<() => void> = [];
 const messageCache = new Map<string, MessageSnapshot>();
 const injectedDeletedMessages = new Set<string>();
-const pendingReinjectChannels = new Set<string>();
-const reinjectAttempts = new Map<string, number>();
 const recentlyPreservedDeletes = new Map<string, number>();
-const reinjectTimeouts: Array<ReturnType<typeof setTimeout>> = [];
-let reinjectInterval: ReturnType<typeof setInterval> | undefined;
-const MAX_REINJECT_ATTEMPTS = 5;
 const RECENTLY_PRESERVED_DELETE_MS = 1500;
 
 const ActionSheet = findByProps("openLazy", "hideActionSheet");
 const ChannelStore = findByProps("getChannel", "getDMFromUserId");
 const ChannelMessages = findByProps("_channelMessages");
 const MessageStore = findByProps("getMessage", "getMessages");
-const SelectedChannelStore = findByStoreName("SelectedChannelStore");
 
 function ensureStorage() {
     const nextSettings = normalizeSettings(storage.settings);
@@ -146,25 +139,9 @@ function getCachedOrStoredMessage(channelId: string, messageId: string) {
     }
 }
 
-function getSelectedChannelId(): string | undefined {
-    try {
-        return SelectedChannelStore?.getChannelId?.() ?? SelectedChannelStore?.getLastSelectedChannelId?.();
-    } catch {
-        return undefined;
-    }
-}
-
 function shouldReinjectDeletedMessages() {
     const settingsValue = normalizeSettings(storage.settings);
     return settingsValue.logDeletes && settingsValue.showDeletedInChannelsAfterRestart;
-}
-
-function getChannelMessageCache(channelId: string) {
-    try {
-        return ChannelMessages?.get?.(channelId);
-    } catch {
-        return null;
-    }
 }
 
 function hasStoredMessage(channelId: string, messageId: string) {
@@ -195,7 +172,6 @@ function consumeSyntheticDeletedDismiss(event: any): boolean {
 
     writeRecords(clearMessageKindRecords({ records: readRecords() }, channelId, messageId, "delete").records);
     injectedDeletedMessages.delete(key);
-    reinjectAttempts.delete(key);
     recentlyPreservedDeletes.delete(key);
     messageCache.delete(key);
     return true;
@@ -261,104 +237,27 @@ function injectDeletedRecordsIntoMessageBatch(event: any) {
 
     for (const record of records) {
         const key = messageKey(record.channelId, record.messageId);
-        if (injectedDeletedMessages.has(key) || existingIds.has(record.messageId) || hasStoredMessage(record.channelId, record.messageId)) {
-            if (existingIds.has(record.messageId) || hasStoredMessage(record.channelId, record.messageId)) injectedDeletedMessages.add(key);
-            reinjectAttempts.delete(key);
+        const alreadyInBatch = existingIds.has(record.messageId);
+        const alreadyStored = hasStoredMessage(record.channelId, record.messageId);
+
+        if (alreadyInBatch || alreadyStored) {
+            injectedDeletedMessages.add(key);
             continue;
         }
+
+        // Do not skip only because this set remembers an earlier reinjection. Mobile can briefly render
+        // a row, replace the loaded list, and then need the same deleted row injected into a later batch.
+        injectedDeletedMessages.delete(key);
 
         const syntheticMessage = createSyntheticDeletedMessage(record);
         syntheticMessages.push(syntheticMessage);
         existingIds.add(record.messageId);
         injectedDeletedMessages.add(key);
-        reinjectAttempts.delete(key);
         rememberMessage(syntheticMessage, record.channelId);
     }
 
     if (!syntheticMessages.length) return;
     event.messages = sortMessagesLikeBatch([...event.messages, ...syntheticMessages], event.messages);
-}
-
-function reinjectDeletedMessagesForChannel(channelId?: string) {
-    if (!channelId || !shouldReinjectDeletedMessages()) return;
-    if (!getChannelMessageCache(channelId)) return;
-
-    const records = sortOldestByMessageTime(
-        getKindRecords({ records: readRecords() }, "delete").filter((record) => record.channelId === channelId),
-    );
-
-    for (const record of records) {
-        const key = messageKey(record.channelId, record.messageId);
-        if (injectedDeletedMessages.has(key)) continue;
-        if (hasStoredMessage(record.channelId, record.messageId)) {
-            injectedDeletedMessages.add(key);
-            reinjectAttempts.delete(key);
-            continue;
-        }
-
-        const attempts = reinjectAttempts.get(key) ?? 0;
-        if (attempts >= MAX_REINJECT_ATTEMPTS) continue;
-        reinjectAttempts.set(key, attempts + 1);
-
-        try {
-            const event = createSyntheticDeletedCreateEvent(record);
-            FluxDispatcher.dispatch(event);
-
-            if (hasStoredMessage(record.channelId, record.messageId)) {
-                injectedDeletedMessages.add(key);
-                reinjectAttempts.delete(key);
-                rememberMessage(event.message, record.channelId);
-                continue;
-            }
-
-            const confirmTimeout = setTimeout(() => {
-                if (!hasStoredMessage(record.channelId, record.messageId)) return;
-                injectedDeletedMessages.add(key);
-                reinjectAttempts.delete(key);
-                rememberMessage(event.message, record.channelId);
-            }, 250);
-            reinjectTimeouts.push(confirmTimeout);
-        } catch (error) {
-            console.error("[MessageHistory] deleted message reinjection failed", error);
-        }
-    }
-}
-
-function getLoadedDeletedRecordChannelIds(): string[] {
-    const channelIds = new Set<string>();
-
-    for (const record of getKindRecords({ records: readRecords() }, "delete")) {
-        if (getChannelMessageCache(record.channelId)) channelIds.add(record.channelId);
-    }
-
-    return [...channelIds];
-}
-
-function scheduleLoadedDeletedMessageReinjects() {
-    for (const channelId of getLoadedDeletedRecordChannelIds()) {
-        scheduleDeletedMessageReinject(channelId);
-    }
-}
-
-function scheduleDeletedMessageReinject(channelId?: string) {
-    if (!channelId || pendingReinjectChannels.has(channelId)) return;
-    pendingReinjectChannels.add(channelId);
-
-    const timeout = setTimeout(() => {
-        pendingReinjectChannels.delete(channelId);
-        reinjectDeletedMessagesForChannel(channelId);
-    }, 500);
-
-    reinjectTimeouts.push(timeout);
-}
-
-function startDeletedMessageReinjectLoop() {
-    scheduleDeletedMessageReinject(getSelectedChannelId());
-    scheduleLoadedDeletedMessageReinjects();
-    reinjectInterval = setInterval(() => {
-        scheduleDeletedMessageReinject(getSelectedChannelId());
-        scheduleLoadedDeletedMessageReinjects();
-    }, 2500);
 }
 
 function recordUpdate(event: any) {
@@ -408,7 +307,7 @@ function recordDelete(event: any) {
     saveRecord(record);
 
     markRecentlyPreservedDelete(key);
-    reinjectAttempts.delete(key);
+    injectedDeletedMessages.add(key);
 
     event.message = {
         ...original,
@@ -444,8 +343,6 @@ function patchFluxDispatcher() {
                 injectDeletedRecordsIntoMessageBatch(event);
                 if (event.message) rememberMessage(event.message, event.channelId);
                 rememberMessages(event.messages, event.channelId);
-                scheduleDeletedMessageReinject(event.channelId ?? event.message?.channel_id ?? getSelectedChannelId());
-                scheduleLoadedDeletedMessageReinjects();
             } catch (error) {
                 console.error("[MessageHistory] dispatch capture failed", error);
             }
@@ -514,7 +411,6 @@ export default {
         ensureStorage();
         patchFluxDispatcher();
         patchActionSheet();
-        startDeletedMessageReinjectLoop();
     },
     onUnload() {
         while (unpatches.length) {
@@ -529,14 +425,7 @@ export default {
 
         messageCache.clear();
         injectedDeletedMessages.clear();
-        pendingReinjectChannels.clear();
-        reinjectAttempts.clear();
         recentlyPreservedDeletes.clear();
-        while (reinjectTimeouts.length) clearTimeout(reinjectTimeouts.pop());
-        if (reinjectInterval) {
-            clearInterval(reinjectInterval);
-            reinjectInterval = undefined;
-        }
     },
     settings,
 };
