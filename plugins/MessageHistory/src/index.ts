@@ -29,6 +29,8 @@ const unpatches: Array<() => void> = [];
 const messageCache = new Map<string, MessageSnapshot>();
 const injectedDeletedMessages = new Set<string>();
 const recentlyPreservedDeletes = new Map<string, number>();
+const handledDispatchEvents = new WeakSet<object>();
+const FLUX_DISPATCH_METHODS = ["dispatch", "dirtyDispatch", "maybeDispatch"];
 const RECENTLY_PRESERVED_DELETE_MS = 1500;
 
 const ActionSheet = findByProps("openLazy", "hideActionSheet");
@@ -321,33 +323,49 @@ function recordDelete(event: any) {
     event.isPushNotification = false;
 }
 
+function markDispatchEventHandled(event: any): boolean {
+    if (!event || typeof event !== "object") return false;
+    if (handledDispatchEvents.has(event)) return true;
+
+    handledDispatchEvents.add(event);
+    return false;
+}
+
+function handleDispatchEvent(event: any) {
+    if (!event?.type || markDispatchEventHandled(event)) return;
+
+    if (event.type === "MESSAGE_DELETE") {
+        recordDelete(event);
+        return;
+    }
+
+    if (event.type === "MESSAGE_UPDATE" && !event.otherPluginBypass) {
+        recordUpdate(event);
+        return;
+    }
+
+    injectDeletedRecordsIntoMessageBatch(event);
+    if (event.message) rememberMessage(event.message, event.channelId);
+    rememberMessages(event.messages, event.channelId);
+}
+
 function patchFluxDispatcher() {
-    if (!FluxDispatcher?.dispatch) return;
+    const methods = FLUX_DISPATCH_METHODS.filter((method) => typeof FluxDispatcher?.[method] === "function");
+    if (!methods.length) return;
 
-    safePushUnpatch(() =>
-        before("dispatch", FluxDispatcher, (args: any[]) => {
-            try {
-                const event = args[0];
-                if (!event?.type) return;
-
-                if (event.type === "MESSAGE_DELETE") {
-                    recordDelete(event);
-                    return args;
+    for (const method of methods) {
+        safePushUnpatch(() =>
+            before(method, FluxDispatcher, (args: any[]) => {
+                try {
+                    handleDispatchEvent(args[0]);
+                } catch (error) {
+                    console.error(`[MessageHistory] ${method} capture failed`, error);
                 }
 
-                if (event.type === "MESSAGE_UPDATE" && !event.otherPluginBypass) {
-                    recordUpdate(event);
-                    return args;
-                }
-
-                injectDeletedRecordsIntoMessageBatch(event);
-                if (event.message) rememberMessage(event.message, event.channelId);
-                rememberMessages(event.messages, event.channelId);
-            } catch (error) {
-                console.error("[MessageHistory] dispatch capture failed", error);
-            }
-        }),
-    );
+                return args;
+            }),
+        );
+    }
 }
 
 function findReplyButton(row: any) {
