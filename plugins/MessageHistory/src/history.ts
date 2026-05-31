@@ -126,6 +126,32 @@ export function createSyntheticDeletedCreateEvent(record: HistoryRecord): any {
     };
 }
 
+export function getEventMessageIdentity(event: any): { channelId?: string; messageId?: string } {
+    const message = event?.message;
+
+    return {
+        channelId: event?.channelId ?? event?.channel_id ?? message?.channel_id ?? message?.channelId,
+        messageId: event?.id ?? event?.messageId ?? event?.message_id ?? message?.id,
+    };
+}
+
+export function isSyntheticDeletedMessage(message: any): boolean {
+    if (!message) return false;
+    if (message.message_history_synthetic_deleted === true) return true;
+
+    const flags = Number(message.flags ?? 0);
+    const content = typeof message.content === "string" ? message.content : "";
+    return (flags & 64) === 64 && content.startsWith("[deleted]");
+}
+
+export function shouldConsumeSyntheticDeletedDismiss(input: {
+    hasSavedDeleteRecord: boolean;
+    trackedSyntheticMessage: boolean;
+    protectedRecentDelete?: boolean;
+}): boolean {
+    return input.hasSavedDeleteRecord && input.trackedSyntheticMessage && input.protectedRecentDelete !== true;
+}
+
 export function getKindRecords(state: HistoryState, kind: HistoryRecord["kind"]): HistoryRecord[] {
     return sortNewestFirst(state.records ?? []).filter((record) => record.kind === kind);
 }

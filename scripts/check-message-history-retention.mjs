@@ -4,11 +4,14 @@ import {
   createRecord,
   createSyntheticDeletedCreateEvent,
   createSyntheticDeletedMessage,
+  getEventMessageIdentity,
   getKindRecords,
   getMessageRecords,
   getRecordMessageTimestamp,
+  isSyntheticDeletedMessage,
   normalizeSettings,
   pruneRecords,
+  shouldConsumeSyntheticDeletedDismiss,
   sortOldestByMessageTime,
 } from "../.codex-tmp/MessageHistory/history.mjs";
 import { cycleNumericSetting, nextOptionValue, selectNumericSetting } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
@@ -101,6 +104,26 @@ if (syntheticDelete.message_history_synthetic_deleted !== true) {
   throw new Error("Expected synthetic deleted message to carry a local marker");
 }
 
+if (!isSyntheticDeletedMessage(syntheticDelete)) {
+  throw new Error("Expected synthetic deleted messages to be recognized by the dismiss guard");
+}
+
+if (isSyntheticDeletedMessage({ id: "normal-message", flags: 64, content: "normal ephemeral notice" })) {
+  throw new Error("Expected non-history ephemeral messages to stay outside the dismiss guard");
+}
+
+if (!shouldConsumeSyntheticDeletedDismiss({ hasSavedDeleteRecord: true, trackedSyntheticMessage: true })) {
+  throw new Error("Expected saved synthetic deleted rows to be dismissable");
+}
+
+if (shouldConsumeSyntheticDeletedDismiss({ hasSavedDeleteRecord: true, trackedSyntheticMessage: true, protectedRecentDelete: true })) {
+  throw new Error("Expected fresh delete echoes to be protected from dismiss cleanup");
+}
+
+if (shouldConsumeSyntheticDeletedDismiss({ hasSavedDeleteRecord: false, trackedSyntheticMessage: true })) {
+  throw new Error("Expected synthetic-looking rows without saved history to be ignored");
+}
+
 const syntheticCreateEvent = createSyntheticDeletedCreateEvent(deleteRecords[0]);
 if (
   syntheticCreateEvent.type !== "MESSAGE_CREATE" ||
@@ -109,6 +132,26 @@ if (
   syntheticCreateEvent.otherPluginBypass !== true
 ) {
   throw new Error("Expected synthetic deleted record to create a guarded MESSAGE_CREATE event");
+}
+
+const nestedDeleteIdentity = getEventMessageIdentity({
+  type: "MESSAGE_DELETE",
+  message: {
+    id: "nested-message",
+    channel_id: "nested-channel",
+  },
+});
+if (nestedDeleteIdentity.channelId !== "nested-channel" || nestedDeleteIdentity.messageId !== "nested-message") {
+  throw new Error("Expected delete handling to normalize nested message ids");
+}
+
+const topLevelDeleteIdentity = getEventMessageIdentity({
+  type: "MESSAGE_DELETE",
+  id: "top-level-message",
+  channelId: "top-level-channel",
+});
+if (topLevelDeleteIdentity.channelId !== "top-level-channel" || topLevelDeleteIdentity.messageId !== "top-level-message") {
+  throw new Error("Expected delete handling to keep top-level message ids");
 }
 
 const originalMessageTimestamp = "2026-05-31T16:09:00.000Z";
