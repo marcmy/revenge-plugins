@@ -1,4 +1,5 @@
 import { addRecord, createRecord, getMessageRecords, pruneRecords } from "../.codex-tmp/MessageHistory/history.mjs";
+import { nextOptionValue } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
 
 const settings = {
   logEdits: true,
@@ -37,6 +38,14 @@ const fresh = createRecord("edit", { ...base, id: "fresh-message", content: "fre
 const pruned = pruneRecords([expired, fresh], settings, 10 * 24 * 60 * 60 * 1_000);
 if (pruned.some((record) => record.messageId === "old-message")) {
   throw new Error("Expected age pruning to remove expired records");
+}
+
+if (nextOptionValue("maxAgeDays", 3) !== 7) {
+  throw new Error("Expected max age to cycle from 3 to 7");
+}
+
+if (nextOptionValue("maxTotalRecords", 999) !== 50) {
+  throw new Error("Expected unknown total record value to cycle back to the first preset");
 }
 
 console.log("message history retention ok");
