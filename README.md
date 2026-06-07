@@ -1,3 +1,6 @@
+[![Build and deploy](https://github.com/marcmy/revenge-plugins/actions/workflows/deploy.yml/badge.svg)](https://github.com/marcmy/revenge-plugins/actions/workflows/deploy.yml)
+[![pages-build-deployment](https://github.com/marcmy/revenge-plugins/actions/workflows/pages/pages-build-deployment/badge.svg)](https://github.com/marcmy/revenge-plugins/actions/workflows/pages/pages-build-deployment)
+
 # revenge-plugins
 
 # How to install?
