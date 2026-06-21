@@ -35,5 +35,10 @@
       "@swc/core",
       "esbuild"
     ]
+  },
+  "overrides": {
+    "vendetta-types": {
+      "moment": "2.29.4"
+    }
   }
 }
