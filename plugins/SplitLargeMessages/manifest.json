@@ -7,7 +7,7 @@
       "id": "92076581404545024"
     }
   ],
-  "main": "src/index.ts",
+  "main": "src/markdownEntry.ts",
   "vendetta": {
     "icon": "ic_messages"
   }
