@@ -13,8 +13,7 @@ function findBoundary(text: string, limit: number, preferNewlines: boolean): Bou
   const window = text.slice(0, limit + 1);
   const paragraph = window.lastIndexOf("\n\n");
   const newline = window.lastIndexOf("\n");
-  const whitespaceMatches = [...window.matchAll(/[ \t]+/g)];
-  const whitespace = whitespaceMatches[whitespaceMatches.length - 1];
+  const whitespace = window.match(/[ \t]+(?=[^ \t]*$)/);
 
   if (preferNewlines) {
     if (paragraph >= minUseful) return { start: paragraph, end: paragraph + 2 };
