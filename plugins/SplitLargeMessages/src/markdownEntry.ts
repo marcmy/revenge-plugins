@@ -9,6 +9,8 @@ import { splitMarkdownMessage } from "./markdownSplitter";
 
 let unpatchMarkdownSend: (() => void) | undefined;
 let unpatchMarkdownUpload: (() => void) | undefined;
+let markdownRehydrateInterval: ReturnType<typeof setInterval> | undefined;
+const processingUploadChannels = new Set<string>();
 
 type MessageLocation = {
   index: number;
@@ -101,6 +103,27 @@ function isAutoTextFile(file: any): boolean {
   return name === "message.txt" && (!type || type === "text/plain");
 }
 
+function isAutoTextUpload(upload: any): boolean {
+  if (upload?.showLargeMessageDialog) return true;
+  return isAutoTextFile(upload?.item?.file);
+}
+
+function getChannelUploads(channelId: string, UploadAttachmentStore: any): any[] {
+  if (!UploadAttachmentStore?.getUploads) return [];
+
+  try {
+    const typed = UploadAttachmentStore.getUploads(channelId, 0);
+    if (Array.isArray(typed)) return typed;
+  } catch {}
+
+  try {
+    const basic = UploadAttachmentStore.getUploads(channelId);
+    if (Array.isArray(basic)) return basic;
+  } catch {}
+
+  return [];
+}
+
 function clearDraftAndUploads(channelId: string, DraftManager: any, UploadManager: any) {
   for (const args of [
     [channelId, 0],
@@ -128,6 +151,8 @@ export default {
 
     unpatchMarkdownSend?.();
     unpatchMarkdownUpload?.();
+    if (markdownRehydrateInterval) clearInterval(markdownRehydrateInterval);
+    processingUploadChannels.clear();
 
     const ChannelStore = findByStoreName("ChannelStore");
     const SelectedChannelStore = findByStoreName("SelectedChannelStore");
@@ -136,6 +161,7 @@ export default {
     const UploadHandler = findByProps("promptToUpload");
     const DraftManager = findByProps("clearDraft", "saveDraft");
     const UploadManager = findByProps("clearAll");
+    const UploadAttachmentStore = findByProps("getUploads");
 
     if (!MessageActions || typeof MessageActions.sendMessage !== "function") return;
 
@@ -157,6 +183,40 @@ export default {
       }
     };
 
+    const processAutoTextFile = async (channelId: string, file: any): Promise<boolean> => {
+      if (!isAutoTextFile(file) || typeof file.text !== "function") return false;
+      if (processingUploadChannels.has(channelId)) return true;
+
+      processingUploadChannels.add(channelId);
+      try {
+        const text = await file.text();
+        if (!text || text.length <= getMaxLength()) return false;
+
+        const chunks = splitMarkdownMessage(text, getMaxLength(), Boolean(storage.splitOnWords));
+        if (chunks === false || chunks.length === 0) {
+          showSplitFailure();
+          return true;
+        }
+
+        clearDraftAndUploads(channelId, DraftManager, UploadManager);
+        await sendUploadChunks(channelId, chunks);
+        return true;
+      } finally {
+        processingUploadChannels.delete(channelId);
+      }
+    };
+
+    const pollAutoTextUpload = () => {
+      const channelId = SelectedChannelStore?.getChannelId?.();
+      if (!channelId || processingUploadChannels.has(channelId)) return;
+
+      const uploads = getChannelUploads(channelId, UploadAttachmentStore);
+      if (!uploads.length || !uploads.every(isAutoTextUpload)) return;
+
+      const file = uploads[0]?.item?.file;
+      void processAutoTextFile(channelId, file).catch(() => {});
+    };
+
     unpatchMarkdownSend = instead("sendMessage", MessageActions, (args: any[], orig: (...callArgs: any[]) => any) => {
       const sendArgs = args as any[];
       const { message } = getMessageLocation(sendArgs);
@@ -164,7 +224,7 @@ export default {
       const channelId = resolveChannelId(SelectedChannelStore, sendArgs[0], sendArgs[1], message);
 
       if (!channelId || !content || content.length <= getMaxLength()) {
-        return (orig as (...callArgs: any[]) => any)(...sendArgs);
+        return orig(...sendArgs);
       }
 
       const chunks = splitMarkdownMessage(content, getMaxLength(), Boolean(storage.splitOnWords));
@@ -176,7 +236,7 @@ export default {
       void (async () => {
         for (let i = 0; i < chunks.length; i++) {
           const chunkArgs = buildChunkArgs(sendArgs, channelId, chunks[i], i === 0);
-          await (orig as (...callArgs: any[]) => any)(...chunkArgs);
+          await orig(...chunkArgs);
           if (i < chunks.length - 1) await sleep(getDelay(channelId));
         }
       })().catch(showSplitFailure);
@@ -191,33 +251,27 @@ export default {
         const channelId = resolveChannelId(SelectedChannelStore, channel);
         const isChannelDraft = draftType === 0 || draftType == null;
 
-        if (!channelId || !isChannelDraft || !isAutoTextFile(file) || typeof file.text !== "function") {
-          return (orig as (...callArgs: any[]) => any)(...args);
-        }
+        if (!channelId || !isChannelDraft || !isAutoTextFile(file)) return orig(...args);
 
-        void file
-          .text()
-          .then(async (text: string) => {
-            if (!text || text.length <= getMaxLength()) {
-              return (orig as (...callArgs: any[]) => any)(...args);
-            }
-
-            const chunks = splitMarkdownMessage(text, getMaxLength(), Boolean(storage.splitOnWords));
-            if (chunks === false || chunks.length === 0) {
-              showSplitFailure();
-              return;
-            }
-
-            clearDraftAndUploads(channelId, DraftManager, UploadManager);
-            await sendUploadChunks(channelId, chunks);
+        void processAutoTextFile(channelId, file)
+          .then((handled) => {
+            if (!handled) return orig(...args);
           })
-          .catch(() => (orig as (...callArgs: any[]) => any)(...args));
+          .catch(() => orig(...args));
 
         return undefined;
       });
     }
+
+    pollAutoTextUpload();
+    markdownRehydrateInterval = setInterval(pollAutoTextUpload, 250);
   },
   onUnload() {
+    if (markdownRehydrateInterval) {
+      clearInterval(markdownRehydrateInterval);
+      markdownRehydrateInterval = undefined;
+    }
+    processingUploadChannels.clear();
     unpatchMarkdownUpload?.();
     unpatchMarkdownUpload = undefined;
     unpatchMarkdownSend?.();
