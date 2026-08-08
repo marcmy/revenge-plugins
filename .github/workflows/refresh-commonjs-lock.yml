@@ -1,0 +1,32 @@
+name: Refresh commonjs lockfile
+
+on:
+  push:
+    branches:
+      - chore/commonjs-rollup4
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: chore/commonjs-rollup4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Refresh package lock
+        run: npm install --package-lock-only --ignore-scripts --save-dev '@rollup/plugin-commonjs@^25.0.8'
+      - name: Commit lockfile and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/refresh-commonjs-lock.yml
+          git add package.json package-lock.json
+          git commit -m "chore(deps-dev): refresh commonjs lockfile"
+          git push origin HEAD:chore/commonjs-rollup4
