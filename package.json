@@ -15,7 +15,7 @@
     "@swc/helpers": "^0.5.23"
   },
   "devDependencies": {
-    "@rollup/plugin-commonjs": "^25.0.8",
+    "@rollup/plugin-commonjs": "^29.0.3",
     "@rollup/plugin-node-resolve": "^16.0.3",
     "@rollup/plugin-url": "latest",
     "@swc/core": "^1.15.47",
