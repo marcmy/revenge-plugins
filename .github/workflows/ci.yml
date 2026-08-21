@@ -40,8 +40,11 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --no-audit --prefer-offline
 
-      - name: Audit high-severity dependencies
-        run: npm audit --audit-level=high
+      - name: Audit shipped dependencies
+        # vendetta-types pulls Metro/image-size only as build-time dev tooling.
+        # GitHub currently lists no patched image-size release for its DoS advisories;
+        # Trivy still scans the full lockfile, while this gate protects shipped deps.
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Build plugins
         run: npm run build
