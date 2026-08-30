@@ -12,3 +12,4 @@ https://marcmy.github.io/revenge-plugins/`PLUGIN_NAME`
 - SplitLargeMessages: [Install Link](https://marcmy.github.io/revenge-plugins/SplitLargeMessages/)
 - HideChannelListShortcuts: [Install Link](https://marcmy.github.io/revenge-plugins/HideChannelListShortcuts/)
 - MessageHistory: [Install Link](https://marcmy.github.io/revenge-plugins/MessageHistory/)
+- LongScreenshotFix: [Install Link](https://marcmy.github.io/revenge-plugins/LongScreenshotFix/)
