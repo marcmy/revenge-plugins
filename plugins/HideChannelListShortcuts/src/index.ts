@@ -24,6 +24,7 @@ const EVENTS_COMPONENT_NAMES = [
 
 function shouldHideGuildActionRow(row: any): boolean {
     if (storage.hideServerBoosts && row === GUILD_BOOSTS_ROW) return true;
+    if (storage.hideBoostGoal && row === GUILD_PREMIUM_PROGRESS_BAR_ROW) return true;
     if (storage.hideEvents && row === GUILD_SCHEDULED_EVENTS_ROW) return true;
     return false;
 }
@@ -95,8 +96,8 @@ function patchChannelListStore() {
             if (!filteredRows || filteredRows.length === rows.length) return;
 
             // Filter the action-row model before ChannelListState/FastList is
-            // constructed. This is what removes both the hidden row's space
-            // and the otherwise-leftover guild-actions footer divider.
+            // constructed. This removes the hidden row's space and keeps the
+            // guild-actions footer bookkeeping consistent with what is shown.
             args[1] = {
                 ...options,
                 guildActionRows: filteredRows,
@@ -217,6 +218,7 @@ function patchChannelListLayout() {
 export default {
     onLoad() {
         storage.hideServerBoosts ??= true;
+        storage.hideBoostGoal ??= false;
         storage.hideEvents ??= false;
 
         patchChannelListStore();
