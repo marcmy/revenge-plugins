@@ -1,6 +1,6 @@
 import { findByProps } from "@vendetta/metro";
 import { React } from "@vendetta/metro/common";
-import { instead } from "@vendetta/patcher";
+import { before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
 import settings from "./settings";
@@ -47,6 +47,11 @@ function shouldHideGuildActionRow(row: any): boolean {
     return false;
 }
 
+function filterGuildActionRows(rows: any): any {
+    if (!Array.isArray(rows)) return rows;
+    return rows.filter((row) => !shouldHideGuildActionRow(row));
+}
+
 function getGuildActionRow(guildChannels: any, row: any): any {
     try {
         return guildChannels?.getGuildActionSection?.()?.getRow?.(row);
@@ -55,11 +60,26 @@ function getGuildActionRow(guildChannels: any, row: any): any {
     }
 }
 
-function hasVisibleGuildActionRows(guildChannels: any): boolean | undefined {
+function shouldHaveGuildActionFooter(guildChannels: any): boolean | undefined {
     try {
         const rows = guildChannels?.getGuildActionSection?.()?.getRows?.();
         if (!Array.isArray(rows)) return undefined;
-        return rows.some((row) => !shouldHideGuildActionRow(row));
+
+        const visibleRows = filterGuildActionRows(rows);
+        if (!Array.isArray(visibleRows)) return undefined;
+
+        // Discord intentionally omits the guild-actions footer divider when
+        // Scheduled Events is the only action row. If Boosts is hidden from a
+        // [Scheduled Events, Boosts] section, preserve that same behavior.
+        if (visibleRows.length === 0) return false;
+        if (
+            visibleRows.length === 1 &&
+            visibleRows[0] === GUILD_SCHEDULED_EVENTS_ROW
+        ) {
+            return false;
+        }
+
+        return true;
     } catch {
         return undefined;
     }
@@ -70,6 +90,33 @@ function safeRegisterPatch(register: () => (() => void) | void) {
         const unpatch = register();
         if (typeof unpatch === "function") unpatches.push(unpatch);
     } catch { }
+}
+
+function patchChannelListStore() {
+    const channelListStore = findByProps(
+        "getGuild",
+        "getGuildWithoutChangingGuildActionRows",
+        "recentsChannelCount"
+    );
+    if (!channelListStore || typeof channelListStore.getGuild !== "function") return;
+
+    safeRegisterPatch(() =>
+        before("getGuild", channelListStore, (args) => {
+            const options = args?.[1];
+            const rows = options?.guildActionRows;
+            if (!Array.isArray(rows)) return;
+
+            const filteredRows = filterGuildActionRows(rows);
+            if (!Array.isArray(filteredRows) || filteredRows.length === rows.length) return;
+
+            // Feed the filtered rows into ChannelListState so FastList never
+            // allocates a row (or footer divider) for shortcuts we hide.
+            args[1] = {
+                ...options,
+                guildActionRows: filteredRows,
+            };
+        })
+    );
 }
 
 function patchJsxRuntime() {
@@ -133,7 +180,7 @@ function patchChannelListLayout() {
     }
 
     const shouldRemoveFooter = (guildChannels: any, section: any) =>
-        section === guildActionsSection && hasVisibleGuildActionRows(guildChannels) === false;
+        section === guildActionsSection && shouldHaveGuildActionFooter(guildChannels) === false;
 
     if (typeof renderer.renderChannelListSectionFooter === "function") {
         safeRegisterPatch(() =>
@@ -187,6 +234,7 @@ export default {
         storage.hideServerBoosts ??= true;
         storage.hideEvents ??= false;
 
+        patchChannelListStore();
         patchJsxRuntime();
         patchCreateElement();
         patchChannelListLayout();
