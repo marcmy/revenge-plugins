@@ -8,6 +8,8 @@ const unpatches: Array<() => void> = [];
 
 const GUILD_BOOSTS_ROW = "guild-boosts";
 const GUILD_SCHEDULED_EVENTS_ROW = "guild-scheduled-events";
+const GUILD_PREMIUM_PROGRESS_BAR_ROW = "guild-premium-progress-bar";
+const GUILD_NEW_MEMBER_ACTIONS_PROGRESS_BAR_ROW = "guild-new-member-actions-progress-bar";
 
 const BOOST_COMPONENT_NAMES = [
     "GuildPowerupsChannelRow",
@@ -51,6 +53,18 @@ function shouldHaveGuildActionFooter(guildChannels: any): boolean | undefined {
         if (visibleRows.length === 1 && visibleRows[0] === GUILD_SCHEDULED_EVENTS_ROW) {
             return false;
         }
+
+        // These progress-bar rows render their own trailing Divider. If one
+        // becomes the last visible guild-action row, suppress the section
+        // footer divider so we do not draw two lines back-to-back.
+        const lastVisibleRow = visibleRows[visibleRows.length - 1];
+        if (
+            lastVisibleRow === GUILD_PREMIUM_PROGRESS_BAR_ROW ||
+            lastVisibleRow === GUILD_NEW_MEMBER_ACTIONS_PROGRESS_BAR_ROW
+        ) {
+            return false;
+        }
+
         return true;
     } catch {
         return undefined;
