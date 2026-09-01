@@ -1,4 +1,4 @@
-import { findByProps } from "@vendetta/metro";
+import { findByName, findByProps } from "@vendetta/metro";
 import { instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
@@ -8,6 +8,17 @@ const unpatches: Array<() => void> = [];
 
 const GUILD_BOOSTS_ROW = "guild-boosts";
 const GUILD_SCHEDULED_EVENTS_ROW = "guild-scheduled-events";
+
+const BOOST_COMPONENT_NAMES = [
+    "GuildPowerupsChannelRow",
+    "PowerupsChannelRow",
+];
+
+const EVENTS_COMPONENT_NAMES = [
+    "GuildEventsChannelRow",
+    "GuildEventChannelRow",
+    "EventsChannelRow",
+];
 
 function shouldHideGuildActionRow(row: any): boolean {
     if (storage.hideServerBoosts && row === GUILD_BOOSTS_ROW) return true;
@@ -34,8 +45,8 @@ function shouldHaveGuildActionFooter(guildChannels: any): boolean | undefined {
         const visibleRows = filterGuildActionRows(rows);
         if (!visibleRows) return undefined;
 
-        // Discord intentionally omits this divider when Scheduled Events is
-        // the only guild-action row. Preserve that after hiding Boosts.
+        // Discord omits this divider when Scheduled Events is the only
+        // guild-action row. Preserve that after hiding Boosts.
         if (visibleRows.length === 0) return false;
         if (visibleRows.length === 1 && visibleRows[0] === GUILD_SCHEDULED_EVENTS_ROW) {
             return false;
@@ -53,13 +64,45 @@ function safeRegisterPatch(register: () => (() => void) | void) {
     } catch { }
 }
 
+function patchNamedComponent(name: string, shouldHide: () => boolean) {
+    try {
+        // false returns the module object rather than only its default export,
+        // allowing us to patch this one component without touching React/jsx.
+        const module = findByName(name, false) as any;
+        if (!module || typeof module.default !== "function") return false;
+
+        safeRegisterPatch(() =>
+            instead("default", module, (args, orig) => {
+                if (shouldHide()) return null;
+                return orig(...args);
+            })
+        );
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function patchShortcutComponents() {
+    for (const name of BOOST_COMPONENT_NAMES) {
+        if (patchNamedComponent(name, () => !!storage.hideServerBoosts)) break;
+    }
+
+    for (const name of EVENTS_COMPONENT_NAMES) {
+        if (patchNamedComponent(name, () => !!storage.hideEvents)) break;
+    }
+}
+
 function patchChannelListLayout() {
     const channelListState = findByProps(
         "SECTION_INDEX_GUILD_ACTIONS",
         "SECTION_INDEX_CHANNEL_NOTICES"
     );
+
+    // Do not require renderChannelListItem here. On some Discord/Revenge
+    // builds that export is not discoverable through findByProps, which made
+    // the entire layout patch silently fail.
     const renderer = findByProps(
-        "renderChannelListItem",
         "getChannelListItemSize",
         "renderChannelListSectionFooter",
         "getChannelListSectionFooterSize"
@@ -69,28 +112,16 @@ function patchChannelListLayout() {
 
     const guildActionsSection = channelListState.SECTION_INDEX_GUILD_ACTIONS;
 
-    const isHiddenItem = (item: any) =>
-        item?.section === guildActionsSection &&
-        shouldHideGuildActionRow(getGuildActionRow(item.guildChannels, item.row));
-
-    // Hide the shortcut at the channel-list renderer itself. This avoids
-    // globally patching React/jsx and prevents GuildPowerupsChannelRow from
-    // executing at all for a hidden Boosts row.
-    if (typeof renderer.renderChannelListItem === "function") {
-        safeRegisterPatch(() =>
-            instead("renderChannelListItem", renderer, (args, orig) => {
-                const [item] = args as [any];
-                if (isHiddenItem(item)) return null;
-                return orig(...args);
-            })
-        );
-    }
-
     if (typeof renderer.getChannelListItemSize === "function") {
         safeRegisterPatch(() =>
             instead("getChannelListItemSize", renderer, (args, orig) => {
                 const [item] = args as [any];
-                if (isHiddenItem(item)) return 0;
+                if (
+                    item?.section === guildActionsSection &&
+                    shouldHideGuildActionRow(getGuildActionRow(item.guildChannels, item.row))
+                ) {
+                    return 0;
+                }
                 return orig(...args);
             })
         );
@@ -150,6 +181,8 @@ export default {
     onLoad() {
         storage.hideServerBoosts ??= true;
         storage.hideEvents ??= false;
+
+        patchShortcutComponents();
         patchChannelListLayout();
     },
     onUnload() {
