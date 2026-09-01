@@ -1,6 +1,6 @@
 import { findByProps } from "@vendetta/metro";
 import { React } from "@vendetta/metro/common";
-import { before, instead } from "@vendetta/patcher";
+import { instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
 import settings from "./settings";
@@ -90,33 +90,6 @@ function safeRegisterPatch(register: () => (() => void) | void) {
         const unpatch = register();
         if (typeof unpatch === "function") unpatches.push(unpatch);
     } catch { }
-}
-
-function patchChannelListStore() {
-    const channelListStore = findByProps(
-        "getGuild",
-        "getGuildWithoutChangingGuildActionRows",
-        "recentsChannelCount"
-    );
-    if (!channelListStore || typeof channelListStore.getGuild !== "function") return;
-
-    safeRegisterPatch(() =>
-        before("getGuild", channelListStore, (args) => {
-            const options = args?.[1];
-            const rows = options?.guildActionRows;
-            if (!Array.isArray(rows)) return;
-
-            const filteredRows = filterGuildActionRows(rows);
-            if (!Array.isArray(filteredRows) || filteredRows.length === rows.length) return;
-
-            // Feed the filtered rows into ChannelListState so FastList never
-            // allocates a row (or footer divider) for shortcuts we hide.
-            args[1] = {
-                ...options,
-                guildActionRows: filteredRows,
-            };
-        })
-    );
 }
 
 function patchJsxRuntime() {
@@ -234,7 +207,6 @@ export default {
         storage.hideServerBoosts ??= true;
         storage.hideEvents ??= false;
 
-        patchChannelListStore();
         patchJsxRuntime();
         patchCreateElement();
         patchChannelListLayout();
