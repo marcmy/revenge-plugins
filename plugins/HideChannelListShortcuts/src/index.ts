@@ -1,5 +1,5 @@
 import { findByName, findByProps } from "@vendetta/metro";
-import { instead } from "@vendetta/patcher";
+import { before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
 import settings from "./settings";
@@ -64,10 +64,36 @@ function safeRegisterPatch(register: () => (() => void) | void) {
     } catch { }
 }
 
+function patchChannelListStore() {
+    const channelListStore = findByProps(
+        "getGuild",
+        "getGuildWithoutChangingGuildActionRows",
+        "recentsChannelCount"
+    ) as any;
+
+    if (!channelListStore || typeof channelListStore.getGuild !== "function") return;
+
+    safeRegisterPatch(() =>
+        before("getGuild", channelListStore, (args) => {
+            const options = args?.[1];
+            const rows = options?.guildActionRows;
+            const filteredRows = filterGuildActionRows(rows);
+            if (!filteredRows || filteredRows.length === rows.length) return;
+
+            // Filter the action-row model before ChannelListState/FastList is
+            // constructed. This is what removes both the hidden row's space
+            // and the otherwise-leftover guild-actions footer divider.
+            args[1] = {
+                ...options,
+                guildActionRows: filteredRows,
+            };
+        })
+    );
+}
+
 function patchNamedComponent(name: string, shouldHide: () => boolean) {
     try {
-        // false returns the module object rather than only its default export,
-        // allowing us to patch this one component without touching React/jsx.
+        // Patch only this component; never intercept React.createElement/jsx.
         const module = findByName(name, false) as any;
         if (!module || typeof module.default !== "function") return false;
 
@@ -99,9 +125,6 @@ function patchChannelListLayout() {
         "SECTION_INDEX_CHANNEL_NOTICES"
     );
 
-    // Do not require renderChannelListItem here. On some Discord/Revenge
-    // builds that export is not discoverable through findByProps, which made
-    // the entire layout patch silently fail.
     const renderer = findByProps(
         "getChannelListItemSize",
         "renderChannelListSectionFooter",
@@ -182,6 +205,7 @@ export default {
         storage.hideServerBoosts ??= true;
         storage.hideEvents ??= false;
 
+        patchChannelListStore();
         patchShortcutComponents();
         patchChannelListLayout();
     },
