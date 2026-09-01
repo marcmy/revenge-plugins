@@ -16,6 +16,12 @@ export default () => {
                     value={storage.hideServerBoosts}
                 />
                 <Forms.FormSwitchRow
+                    label="Hide Boost Goal bar"
+                    subLabel="Removes the Boost Goal progress bar when present"
+                    onValueChange={(v) => storage.hideBoostGoal = v}
+                    value={storage.hideBoostGoal}
+                />
+                <Forms.FormSwitchRow
                     label="Hide Events shortcut"
                     subLabel="Also hide the Events row when present"
                     onValueChange={(v) => storage.hideEvents = v}
