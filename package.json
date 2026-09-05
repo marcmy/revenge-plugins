@@ -20,7 +20,7 @@
     "@rollup/plugin-url": "latest",
     "@swc/core": "^1.16.1",
     "esbuild": "^0.28.2",
-    "rollup": "^4.62.5",
+    "rollup": "^4.63.1",
     "rollup-plugin-esbuild": "^6.2.1",
     "vendetta-types": "latest"
   },
