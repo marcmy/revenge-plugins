@@ -1,0 +1,1 @@
+{"name":"LongScreenshotFix","description":"Keeps a deeper Discord message window loaded so Android scrolling screenshots do not stop at the virtualized history boundary","authors":[{"name":"marcmy","id":"92076581404545024"}],"main":"index.js","vendetta":{"icon":"ic_image"},"hash":"78db308f237b473b090f776bbd6b3213e3fc9c37fad4ce5c6fb959b117bc36e0"}
