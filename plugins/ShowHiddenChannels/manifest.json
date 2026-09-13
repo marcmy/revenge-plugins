@@ -1,0 +1,14 @@
+{
+  "name": "ShowHiddenChannels",
+  "description": "Shows server channels you do not have permission to view, with locked styling and no unread indicators",
+  "authors": [
+    {
+      "name": "marcmy",
+      "id": "92076581404545024"
+    }
+  ],
+  "main": "src/index.ts",
+  "vendetta": {
+    "icon": "ic_lock"
+  }
+}
