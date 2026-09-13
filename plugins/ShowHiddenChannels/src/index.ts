@@ -14,7 +14,7 @@ let ChannelStore: any;
 let PermissionStore: any;
 let ReadStateStore: any;
 let ChannelUtils: any;
-let ChannelNameUtils: any;
+let PrivateChannelHidingExperiment: any;
 let ChannelActions: any;
 let ChannelTransitions: any;
 let VoiceModalUtils: any;
@@ -76,9 +76,12 @@ function resolveModules() {
     } catch {}
 
     try {
-        ChannelNameUtils ??=
-            findByProps("computeChannelName", "escapeChannelName") ??
-            findByProps("computeChannelName");
+        PrivateChannelHidingExperiment ??= findByProps(
+            "getCachedPrivateChannelObfuscation",
+            "isChannelMetadataObfuscationEnabled",
+            "useIsChannelMetadataObfuscationEnabled",
+            "isChannelMetadataIntegrityCheckEnabled"
+        );
     } catch {}
 
     try {
@@ -415,17 +418,24 @@ function patchChannelIcons() {
     }
 }
 
-function patchChannelNames() {
-    if (typeof ChannelNameUtils?.computeChannelName !== "function") return;
+function patchPrivateChannelHidingExperiment() {
+    if (!PrivateChannelHidingExperiment) {
+        log("private-channel-hiding experiment module was not available");
+        return;
+    }
 
-    safeRegisterPatch(() =>
-        after("computeChannelName", ChannelNameUtils, (args, result) => {
-            const channel = args?.[0];
-            if (!isHiddenChannel(channel) || typeof channel?.name !== "string") return result;
+    for (const method of [
+        "getCachedPrivateChannelObfuscation",
+        "isChannelMetadataObfuscationEnabled",
+        "useIsChannelMetadataObfuscationEnabled",
+        "isChannelMetadataIntegrityCheckEnabled",
+    ]) {
+        if (typeof PrivateChannelHidingExperiment[method] !== "function") continue;
 
-            return channel.name;
-        })
-    );
+        safeRegisterPatch(() =>
+            instead(method, PrivateChannelHidingExperiment, () => false)
+        );
+    }
 }
 
 function patchHiddenChannelNavigation() {
@@ -481,6 +491,7 @@ export default {
     onLoad() {
         storage.hideUnreads ??= true;
         resolveModules();
+        patchPrivateChannelHidingExperiment();
 
         if (!ChannelListStore || !ChannelStore || !PermissionStore || ViewChannelPermission == null) {
             log("required Discord modules were not available; plugin was not patched");
@@ -491,7 +502,6 @@ export default {
         patchChannelListStore();
         patchReadStateStore();
         patchChannelIcons();
-        patchChannelNames();
         patchHiddenChannelNavigation();
 
         try {
