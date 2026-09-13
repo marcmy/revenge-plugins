@@ -15,12 +15,17 @@ let PermissionStore: any;
 let ReadStateStore: any;
 let ChannelUtils: any;
 let PrivateChannelHidingExperiment: any;
+let GatewayCapabilities: any;
+let GatewayConnectionStore: any;
 let ChannelActions: any;
 let ChannelTransitions: any;
 let VoiceModalUtils: any;
 let StageChannelActions: any;
 let ViewChannelPermission: any;
 let originalPermissionCan: ((permission: any, channel: any) => boolean) | undefined;
+let gatewayReconnectAttempted = false;
+let gatewayReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+let pluginEnabled = false;
 
 // PermissionStore.can stays fully real outside the tiny synchronous window in
 // which Discord recomputes one hidden channel's channel-list state.
@@ -82,6 +87,16 @@ function resolveModules() {
             "useIsChannelMetadataObfuscationEnabled",
             "isChannelMetadataIntegrityCheckEnabled"
         );
+    } catch {}
+
+    try {
+        GatewayCapabilities ??= findByProps("getClientCapabilities");
+    } catch {}
+
+    try {
+        GatewayConnectionStore ??=
+            findByStoreName("GatewayConnectionStore") ??
+            findByProps("getSocket", "isConnected", "isTryingToConnect");
     } catch {}
 
     try {
@@ -421,21 +436,66 @@ function patchChannelIcons() {
 function patchPrivateChannelHidingExperiment() {
     if (!PrivateChannelHidingExperiment) {
         log("private-channel-hiding experiment module was not available");
-        return;
+    } else {
+        for (const method of [
+            "getCachedPrivateChannelObfuscation",
+            "isChannelMetadataObfuscationEnabled",
+            "useIsChannelMetadataObfuscationEnabled",
+            "isChannelMetadataIntegrityCheckEnabled",
+        ]) {
+            if (typeof PrivateChannelHidingExperiment[method] !== "function") continue;
+
+            safeRegisterPatch(() =>
+                instead(method, PrivateChannelHidingExperiment, () => false)
+            );
+        }
     }
 
-    for (const method of [
-        "getCachedPrivateChannelObfuscation",
-        "isChannelMetadataObfuscationEnabled",
-        "useIsChannelMetadataObfuscationEnabled",
-        "isChannelMetadataIntegrityCheckEnabled",
-    ]) {
-        if (typeof PrivateChannelHidingExperiment[method] !== "function") continue;
-
+    if (typeof GatewayCapabilities?.getClientCapabilities === "function") {
         safeRegisterPatch(() =>
-            instead(method, PrivateChannelHidingExperiment, () => false)
+            before("getClientCapabilities", GatewayCapabilities, (args) => {
+                const options = args?.[0];
+                args[0] = options && typeof options === "object"
+                    ? { ...options, useChannelObfuscation: false }
+                    : { useChannelObfuscation: false };
+            })
         );
+    } else {
+        log("gateway capabilities module was not available");
     }
+}
+
+function reidentifyGatewayWithoutChannelObfuscation() {
+    if (gatewayReconnectAttempted || !GatewayConnectionStore?.getSocket) return;
+    gatewayReconnectAttempted = true;
+
+    gatewayReconnectTimer = setTimeout(() => {
+        gatewayReconnectTimer = undefined;
+        if (!pluginEnabled) return;
+
+        try {
+            const socket = GatewayConnectionStore.getSocket();
+            if (!socket || typeof socket.close !== "function" || typeof socket.connect !== "function") return;
+
+            // A new IDENTIFY is required for Discord to renegotiate the gateway
+            // capability that controls whether private channel metadata is
+            // obfuscated. A RESUME keeps the old capability set.
+            if (socket.isClosed?.()) return;
+
+            socket.close();
+            setTimeout(() => {
+                try {
+                    const currentSocket = GatewayConnectionStore?.getSocket?.() ?? socket;
+                    currentSocket?.connect?.();
+                    log("reidentified gateway without private channel metadata obfuscation");
+                } catch (error) {
+                    console.error("[ShowHiddenChannels] failed to reconnect gateway", error);
+                }
+            }, 250);
+        } catch (error) {
+            console.error("[ShowHiddenChannels] failed to reidentify gateway", error);
+        }
+    }, 500);
 }
 
 function patchHiddenChannelNavigation() {
@@ -489,6 +549,7 @@ function restoreSeenGuildChannels() {
 
 export default {
     onLoad() {
+        pluginEnabled = true;
         storage.hideUnreads ??= true;
         resolveModules();
         patchPrivateChannelHidingExperiment();
@@ -503,6 +564,7 @@ export default {
         patchReadStateStore();
         patchChannelIcons();
         patchHiddenChannelNavigation();
+        reidentifyGatewayWithoutChannelObfuscation();
 
         try {
             ChannelListStore.emitChange?.();
@@ -512,6 +574,13 @@ export default {
     },
 
     onUnload() {
+        pluginEnabled = false;
+        gatewayReconnectAttempted = false;
+        if (gatewayReconnectTimer != null) {
+            clearTimeout(gatewayReconnectTimer);
+            gatewayReconnectTimer = undefined;
+        }
+
         // With no override active, recomputing restores Discord's real
         // CannotShow state before the patches are removed.
         viewPermissionOverrideChannelId = undefined;
