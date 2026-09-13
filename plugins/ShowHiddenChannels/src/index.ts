@@ -14,6 +14,7 @@ let ChannelStore: any;
 let PermissionStore: any;
 let ReadStateStore: any;
 let ChannelUtils: any;
+let ChannelNameUtils: any;
 let ChannelActions: any;
 let ChannelTransitions: any;
 let VoiceModalUtils: any;
@@ -72,6 +73,12 @@ function resolveModules() {
 
     try {
         ChannelUtils ??= findByProps("getChannelIcon", "getChannelIconComponent");
+    } catch {}
+
+    try {
+        ChannelNameUtils ??=
+            findByProps("computeChannelName", "escapeChannelName") ??
+            findByProps("computeChannelName");
     } catch {}
 
     try {
@@ -408,6 +415,19 @@ function patchChannelIcons() {
     }
 }
 
+function patchChannelNames() {
+    if (typeof ChannelNameUtils?.computeChannelName !== "function") return;
+
+    safeRegisterPatch(() =>
+        after("computeChannelName", ChannelNameUtils, (args, result) => {
+            const channel = args?.[0];
+            if (!isHiddenChannel(channel) || typeof channel?.name !== "string") return result;
+
+            return channel.name;
+        })
+    );
+}
+
 function patchHiddenChannelNavigation() {
     if (ChannelActions?.preload) {
         safeRegisterPatch(() =>
@@ -471,6 +491,7 @@ export default {
         patchChannelListStore();
         patchReadStateStore();
         patchChannelIcons();
+        patchChannelNames();
         patchHiddenChannelNavigation();
 
         try {
