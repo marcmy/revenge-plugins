@@ -1,5 +1,6 @@
 import { storage } from "@vendetta/plugin";
 
+import { patchChannelList } from "./patches/channelList";
 import settings from "./settings";
 
 export type RegisterUnpatch = (unpatch: (() => void) | void) => void;
@@ -10,9 +11,9 @@ function registerUnpatch(unpatch: (() => void) | void) {
     if (typeof unpatch === "function") unpatches.push(unpatch);
 }
 
-export function safeRegisterPatch(register: () => (() => void) | void) {
+function safeStartPatch(start: (registerUnpatch: RegisterUnpatch) => void) {
     try {
-        registerUnpatch(register());
+        start(registerUnpatch);
     } catch { }
 }
 
@@ -21,6 +22,8 @@ export default {
         storage.hideUnreads ??= true;
         storage.displayMode ??= "lock";
         storage.showInfoScreen ??= true;
+
+        safeStartPatch(patchChannelList);
     },
     onUnload() {
         while (unpatches.length) {
