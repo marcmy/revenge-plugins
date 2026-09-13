@@ -18,7 +18,6 @@ let PermissionStore: any;
 let ReadStateStore: any;
 let ChannelUtils: any;
 let PrivateChannelHidingExperiment: any;
-let GatewayCapabilities: any;
 let GatewayConnectionStore: any;
 let ChannelActions: any;
 let ChannelTransitions: any;
@@ -29,6 +28,7 @@ let originalPermissionCan: ((permission: any, channel: any) => boolean) | undefi
 let gatewayReconnectAttempted = false;
 let gatewayReconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let pluginEnabled = false;
+let forceFullGuildSyncOnNextIdentify = false;
 
 // PermissionStore.can stays fully real outside the tiny synchronous window in
 // which Discord recomputes one hidden channel's channel-list state.
@@ -90,10 +90,6 @@ function resolveModules() {
             "useIsChannelMetadataObfuscationEnabled",
             "isChannelMetadataIntegrityCheckEnabled"
         );
-    } catch {}
-
-    try {
-        GatewayCapabilities ??= findByProps("getClientCapabilities");
     } catch {}
 
     try {
@@ -454,18 +450,6 @@ function patchPrivateChannelHidingExperiment() {
         }
     }
 
-    if (typeof GatewayCapabilities?.getClientCapabilities === "function") {
-        safeRegisterPatch(() =>
-            before("getClientCapabilities", GatewayCapabilities, (args) => {
-                const options = args?.[0];
-                args[0] = options && typeof options === "object"
-                    ? { ...options, useChannelObfuscation: false }
-                    : { useChannelObfuscation: false };
-            })
-        );
-    } else {
-        log("gateway capabilities module was not available");
-    }
 }
 
 function patchGatewayIdentifyPayload() {
@@ -499,14 +483,17 @@ function patchGatewayIdentifyPayload() {
             }
 
             // An existing mobile channel cache may contain the obfuscated
-            // records from the previous session. Empty guild_versions forces
-            // a full guild/channel sync on this fresh IDENTIFY so those records
-            // are actually replaced by the unobfuscated metadata.
-            payload.client_state = { guild_versions: {} };
+            // records from the previous session. Force a full guild/channel
+            // sync only for the one fresh IDENTIFY initiated by this plugin.
+            const clearedChannelCacheVersions = forceFullGuildSyncOnNextIdentify;
+            if (clearedChannelCacheVersions) {
+                payload.client_state = { guild_versions: {} };
+                forceFullGuildSyncOnNextIdentify = false;
+            }
 
             log("patched gateway IDENTIFY", {
                 capabilities: payload.capabilities,
-                clearedChannelCacheVersions: true,
+                clearedChannelCacheVersions,
             });
         })
     );
@@ -529,6 +516,7 @@ function reidentifyGatewayWithoutChannelObfuscation() {
             // obfuscated. A RESUME keeps the old capability set.
             if (socket.isClosed?.()) return;
 
+            forceFullGuildSyncOnNextIdentify = true;
             socket.close();
             setTimeout(() => {
                 try {
@@ -624,6 +612,7 @@ export default {
     onUnload() {
         pluginEnabled = false;
         gatewayReconnectAttempted = false;
+        forceFullGuildSyncOnNextIdentify = false;
         if (gatewayReconnectTimer != null) {
             clearTimeout(gatewayReconnectTimer);
             gatewayReconnectTimer = undefined;
