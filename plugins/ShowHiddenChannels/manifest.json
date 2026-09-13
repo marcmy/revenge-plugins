@@ -1,0 +1,14 @@
+{
+  "name": "ShowHiddenChannels",
+  "description": "Show inaccessible guild channels that Discord already exposes to the client, with safe read-only handling",
+  "authors": [
+    {
+      "name": "marcmy",
+      "id": "92076581404545024"
+    }
+  ],
+  "main": "src/index.ts",
+  "vendetta": {
+    "icon": "LockIcon"
+  }
+}
