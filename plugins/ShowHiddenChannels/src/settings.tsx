@@ -21,17 +21,9 @@ export default () => {
                     onValueChange={(value) => storage.showInfoScreen = value}
                     value={storage.showInfoScreen}
                 />
-                <Forms.FormRadioRow
-                    label="Lock style"
-                    subLabel="Use the normal channel row with its inaccessible/lock presentation"
-                    selected={storage.displayMode === "lock"}
-                    onPress={() => storage.displayMode = "lock"}
-                />
-                <Forms.FormRadioRow
-                    label="Muted style"
-                    subLabel="Use a subdued row style when the current Discord renderer exposes a safe hook"
-                    selected={storage.displayMode === "muted"}
-                    onPress={() => storage.displayMode = "muted"}
+                <Forms.FormRow
+                    label="Display style"
+                    subLabel="Lock/inaccessible style. Muted styling is intentionally disabled until Discord exposes a stable mobile row hook."
                 />
             </ReactNative.ScrollView>
         </ErrorBoundary>

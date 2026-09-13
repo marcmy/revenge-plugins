@@ -1,10 +1,9 @@
-import { findByName, findByProps } from "@vendetta/metro";
-import { React } from "@vendetta/metro/common";
+import { findByProps } from "@vendetta/metro";
 import { instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 
-import { getChannel, isHiddenChannel, isTextLikeChannel, isVoiceLikeChannel } from "../core/hiddenChannel";
-import HiddenChannelScreen from "../ui/HiddenChannelScreen";
+import { getChannel, isHiddenChannel } from "../core/hiddenChannel";
+import { showHiddenChannelInfo } from "../ui/HiddenChannelScreen";
 
 type RegisterUnpatch = (unpatch: (() => void) | void) => void;
 
@@ -15,40 +14,20 @@ function resolveNavigationTarget(args: any[]): any {
         getChannel(args?.[0]);
 }
 
-export function patchNavigation(registerUnpatch: RegisterUnpatch): void {
-    const messagesWrapper = findByName("MessagesWrapperConnected", false) as any;
+export function patchNavigation(registerUnpatch: RegisterUnpatch): boolean {
     const router = findByProps("transitionToGuild") as any;
+    if (!router || typeof router.transitionToGuild !== "function") return false;
 
-    const canRenderInfo = !!messagesWrapper && typeof messagesWrapper.default === "function";
+    registerUnpatch(instead("transitionToGuild", router, (args, orig) => {
+        const channel = resolveNavigationTarget(args as any[]);
+        if (!channel || !isHiddenChannel(channel)) return orig(...args);
 
-    if (canRenderInfo) {
-        registerUnpatch(instead("default", messagesWrapper, (args, orig) => {
-            const channel = getChannel(args?.[0]?.channel);
-            if (channel && isHiddenChannel(channel)) {
-                if (!storage.showInfoScreen) return null;
-                return React.createElement(HiddenChannelScreen, { channel });
-            }
-            return orig(...args);
-        }));
-    }
+        // Never enter Discord's normal chat/voice route for a hidden channel.
+        // The information view is a local modal populated only from the
+        // channel object Discord already supplied to the client.
+        if (storage.showInfoScreen) showHiddenChannelInfo(channel);
+        return undefined;
+    }));
 
-    if (router && typeof router.transitionToGuild === "function") {
-        registerUnpatch(instead("transitionToGuild", router, (args, orig) => {
-            const channel = resolveNavigationTarget(args as any[]);
-            if (!channel || !isHiddenChannel(channel)) return orig(...args);
-
-            // Entering a hidden channel is only useful when the read-only view
-            // can replace Discord's normal messages surface. Otherwise consume
-            // the navigation rather than opening ordinary chat.
-            if (
-                canRenderInfo &&
-                storage.showInfoScreen &&
-                (isTextLikeChannel(channel) || isVoiceLikeChannel(channel))
-            ) {
-                return orig(...args);
-            }
-
-            return undefined;
-        }));
-    }
+    return true;
 }

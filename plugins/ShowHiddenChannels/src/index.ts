@@ -8,6 +8,7 @@ import { patchVoice } from "./patches/voice";
 import settings from "./settings";
 
 export type RegisterUnpatch = (unpatch: (() => void) | void) => void;
+type PatchStarter = (registerUnpatch: RegisterUnpatch) => boolean;
 
 const unpatches: Array<() => void> = [];
 
@@ -15,28 +16,37 @@ function registerUnpatch(unpatch: (() => void) | void) {
     if (typeof unpatch === "function") unpatches.push(unpatch);
 }
 
-function safeStartPatch(start: (registerUnpatch: RegisterUnpatch) => void) {
+function safeStartPatch(name: string, start: PatchStarter): boolean {
     try {
-        start(registerUnpatch);
+        return start(registerUnpatch);
     } catch (error) {
         try {
-            console.error("[ShowHiddenChannels] patch registration failed", error);
+            console.error(`[ShowHiddenChannels] ${name} patch registration failed`, error);
         } catch { }
+        return false;
     }
 }
 
 export default {
     onLoad() {
         storage.hideUnreads ??= true;
-        storage.displayMode ??= "lock";
+        storage.displayMode = "lock";
         storage.showInfoScreen ??= true;
 
-        // Install safety guards before making hidden rows visible.
-        safeStartPatch(patchFetching);
-        safeStartPatch(patchVoice);
-        safeStartPatch(patchUnreads);
-        safeStartPatch(patchNavigation);
-        safeStartPatch(patchChannelList);
+        // Hidden rows are exposed only after every required safety guard is in
+        // place. Unread suppression is cosmetic and therefore optional.
+        const fetchSafe = safeStartPatch("fetching", patchFetching);
+        const voiceSafe = safeStartPatch("voice", patchVoice);
+        const navigationSafe = safeStartPatch("navigation", patchNavigation);
+        safeStartPatch("unreads", patchUnreads);
+
+        if (fetchSafe && voiceSafe && navigationSafe) {
+            safeStartPatch("channel list", patchChannelList);
+        } else {
+            try {
+                console.warn("[ShowHiddenChannels] required guard unavailable; hidden rows will not be revealed");
+            } catch { }
+        }
     },
     onUnload() {
         while (unpatches.length) {

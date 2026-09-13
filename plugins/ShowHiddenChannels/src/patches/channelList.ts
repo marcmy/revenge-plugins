@@ -12,7 +12,7 @@ function isGuildPermissionTarget(channelOrId: any): boolean {
     return !!(channel && typeof channel === "object" && (channel.guild_id ?? channel.guildId));
 }
 
-export function patchChannelList(registerUnpatch: RegisterUnpatch): void {
+export function patchChannelList(registerUnpatch: RegisterUnpatch): boolean {
     const channelListStore = findByProps(
         "getGuild",
         "getGuildWithoutChangingGuildActionRows",
@@ -21,8 +21,8 @@ export function patchChannelList(registerUnpatch: RegisterUnpatch): void {
 
     const { PermissionStore, VIEW_CHANNEL } = hiddenChannelRuntime;
 
-    if (!channelListStore || typeof channelListStore.getGuild !== "function") return;
-    if (!PermissionStore || typeof PermissionStore.can !== "function" || VIEW_CHANNEL == null) return;
+    if (!channelListStore || typeof channelListStore.getGuild !== "function") return false;
+    if (!PermissionStore || typeof PermissionStore.can !== "function" || VIEW_CHANNEL == null) return false;
 
     // Keep the permission relaxation strictly inside synchronous guild-list model
     // construction. All other Discord permission checks retain their real result.
@@ -46,4 +46,6 @@ export function patchChannelList(registerUnpatch: RegisterUnpatch): void {
             channelListBuildDepth--;
         }
     }));
+
+    return true;
 }

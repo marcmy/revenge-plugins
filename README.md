@@ -13,3 +13,4 @@ https://marcmy.github.io/revenge-plugins/`PLUGIN_NAME`
 - HideChannelListShortcuts: [Install Link](https://marcmy.github.io/revenge-plugins/HideChannelListShortcuts/)
 - MessageHistory: [Install Link](https://marcmy.github.io/revenge-plugins/MessageHistory/)
 - LongScreenshotFix: [Install Link](https://marcmy.github.io/revenge-plugins/LongScreenshotFix/)
+- ShowHiddenChannels: [Install Link](https://marcmy.github.io/revenge-plugins/ShowHiddenChannels/)

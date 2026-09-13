@@ -11,31 +11,35 @@ function shouldSuppress(channelId: any): boolean {
 }
 
 function patchBooleanMethod(target: any, method: string, registerUnpatch: RegisterUnpatch) {
-    if (typeof target?.[method] !== "function") return;
+    if (typeof target?.[method] !== "function") return false;
     registerUnpatch(after(method, target, (args, result) => {
         if (shouldSuppress(args?.[0])) return false;
         return result;
     }));
+    return true;
 }
 
 function patchCountMethod(target: any, method: string, registerUnpatch: RegisterUnpatch) {
-    if (typeof target?.[method] !== "function") return;
+    if (typeof target?.[method] !== "function") return false;
     registerUnpatch(after(method, target, (args, result) => {
         if (shouldSuppress(args?.[0])) return 0;
         return result;
     }));
+    return true;
 }
 
-export function patchUnreads(registerUnpatch: RegisterUnpatch): void {
+export function patchUnreads(registerUnpatch: RegisterUnpatch): boolean {
     const readStateStore = (
         findByStoreName("ReadStateStore") ??
         findByProps("hasUnread", "lastMessageId") ??
         findByProps("getUnreadCount")
     ) as any;
 
-    if (!readStateStore) return;
+    if (!readStateStore) return false;
 
-    patchBooleanMethod(readStateStore, "hasUnread", registerUnpatch);
-    patchCountMethod(readStateStore, "getUnreadCount", registerUnpatch);
-    patchCountMethod(readStateStore, "getMentionCount", registerUnpatch);
+    let patched = false;
+    patched = patchBooleanMethod(readStateStore, "hasUnread", registerUnpatch) || patched;
+    patched = patchCountMethod(readStateStore, "getUnreadCount", registerUnpatch) || patched;
+    patched = patchCountMethod(readStateStore, "getMentionCount", registerUnpatch) || patched;
+    return patched;
 }

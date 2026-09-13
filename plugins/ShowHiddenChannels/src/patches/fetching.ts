@@ -12,17 +12,19 @@ function resolveFetchTarget(arg: any): any {
         getChannel(arg);
 }
 
-export function patchFetching(registerUnpatch: RegisterUnpatch): void {
+export function patchFetching(registerUnpatch: RegisterUnpatch): boolean {
     const messageActions = (
         findByProps("fetchMessages", "jumpToMessage") ??
         findByProps("stores", "fetchMessages")
     ) as any;
 
-    if (!messageActions || typeof messageActions.fetchMessages !== "function") return;
+    if (!messageActions || typeof messageActions.fetchMessages !== "function") return false;
 
     registerUnpatch(instead("fetchMessages", messageActions, (args, orig) => {
         const channel = resolveFetchTarget(args?.[0]);
         if (channel && isHiddenChannel(channel)) return undefined;
         return orig(...args);
     }));
+
+    return true;
 }

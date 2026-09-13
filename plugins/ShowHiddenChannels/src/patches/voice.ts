@@ -5,9 +5,9 @@ import { getChannel, isHiddenChannel, isVoiceLikeChannel } from "../core/hiddenC
 
 type RegisterUnpatch = (unpatch: (() => void) | void) => void;
 
-export function patchVoice(registerUnpatch: RegisterUnpatch): void {
+export function patchVoice(registerUnpatch: RegisterUnpatch): boolean {
     const voiceActions = findByProps("selectVoiceChannel") as any;
-    if (!voiceActions || typeof voiceActions.selectVoiceChannel !== "function") return;
+    if (!voiceActions || typeof voiceActions.selectVoiceChannel !== "function") return false;
 
     registerUnpatch(instead("selectVoiceChannel", voiceActions, (args, orig) => {
         const channel = getChannel(args?.[0]?.channelId) ?? getChannel(args?.[0]);
@@ -16,4 +16,6 @@ export function patchVoice(registerUnpatch: RegisterUnpatch): void {
         }
         return orig(...args);
     }));
+
+    return true;
 }
