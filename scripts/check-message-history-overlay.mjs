@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import {
   createRenderRefreshScheduler,
   getLoadedMessageWindow,
@@ -156,5 +158,24 @@ if (refreshes !== 1) {
   throw new Error(`Expected rapid refresh requests to coalesce to 1, got ${refreshes}`);
 }
 scheduler.dispose();
+
+const indexSource = readFileSync("plugins/MessageHistory/src/index.ts", "utf8");
+for (const token of [
+  "createSyntheticDeletedMessage",
+  "injectedDeletedMessages",
+  "recentlyPreservedDeletes",
+  "consumeSyntheticDeletedDismiss",
+  'event.type = "MESSAGE_UPDATE"',
+  "event.messages = sortMessagesLikeBatch",
+]) {
+  if (indexSource.includes(token)) {
+    throw new Error(`Forbidden legacy reinjection path remains: ${token}`);
+  }
+}
+for (const token of ['findByName("createChannelStream"', "RecentMessageCache", "mergeDeletedRows"]) {
+  if (!indexSource.includes(token)) {
+    throw new Error(`Expected redesigned runtime wiring to include: ${token}`);
+  }
+}
 
 console.log("message history overlay ok");
