@@ -96,6 +96,8 @@ Delete records store at least:
 
 Existing records without `inlineHidden` are migrated/normalized as `false`.
 
+If legacy storage contains more than one delete record for the same `channelId + messageId`, history browsing may retain those records, but inline rendering must collapse them to one tombstone using the newest delete record as the canonical inline record. Hiding that tombstone marks all matching delete records for that message as `inlineHidden=true` so a legacy duplicate cannot make it reappear later.
+
 The existing global/per-channel/per-message/max-age retention logic continues to apply to both edit and delete records.
 
 ### 3. Bounded runtime cache
@@ -104,14 +106,14 @@ The runtime cache is only a capture aid for recovering the previous real message
 
 Requirements:
 
-- hard upper bound by entry count;
-- recency-based eviction (simple LRU/FIFO is sufficient);
+- hard limit of 750 message snapshots;
+- recency-based eviction (LRU preferred; FIFO acceptable only if LRU would materially complicate the implementation);
 - no persisted ownership semantics;
 - no synthetic deleted messages stored in the cache;
 - cache cleared on plugin unload;
-- cache entries should retain only what capture needs rather than becoming a parallel unbounded copy of Discord's active message universe.
+- cache entries retain only fields needed for capture/history rather than becoming a parallel copy of Discord's message universe.
 
-A reasonable first bound is 500-1000 recent message snapshots, but the implementation plan should choose a value based on existing plugin behavior and testability rather than coupling it to LongScreenshotFix's target.
+The bound is intentionally independent of LongScreenshotFix's preload target.
 
 ### 4. Render layer: row-stream overlay
 
@@ -119,10 +121,10 @@ Patch Discord's native `createChannelStream` path rather than Discord's canonica
 
 For each channel render:
 
-1. Call Discord's original `createChannelStream` and obtain its normal row descriptors.
-2. Identify the real message rows in the stream and determine the loaded real-message time window.
-3. Read non-hidden persisted delete records for the same channel.
-4. Select only records whose original message timestamp belongs to the currently loaded real-message window.
+1. Call Discord's original/next-patched `createChannelStream` and obtain its normal row descriptors.
+2. Identify real message rows and derive their ordering keys.
+3. Read non-hidden persisted delete records for the same channel and collapse legacy duplicates by `channelId + messageId`.
+4. Select only records eligible for the currently loaded real-message window.
 5. Convert eligible saved records into transient renderer-compatible message-row descriptors/MessageRecords.
 6. Merge them into the row stream using stable chronological ordering.
 7. Return the combined row stream.
@@ -131,25 +133,45 @@ The generated tombstone exists only for that render pass. It is not committed to
 
 ### 5. Placement and pagination rules
 
-Placement must be conservative and deterministic.
-
-#### Loaded-window eligibility
-
-Let `oldestLoaded` and `newestLoaded` be the chronological bounds of real messages currently represented by the channel stream.
-
-A saved delete is eligible when its original message ordering key falls within the loaded window.
-
-If a saved delete is older than `oldestLoaded` and Discord reports `hasMoreBefore`, it is not rendered yet. It becomes eligible only after the user or another plugin loads enough older real history for the window to reach it.
-
-At the live/newest edge, recently deleted messages are eligible when their original ordering key lies in the loaded window. If the row is newer than the newest loaded real message because it was just deleted from the live edge, the renderer may include it as an edge case only when the channel is at the present end (`hasMoreAfter === false`) and its timestamp is no older than the newest loaded region. The implementation plan should define this edge case with explicit tests rather than relying on wall-clock heuristics.
+Placement is conservative and deterministic.
 
 #### Ordering key
 
-Use original message timestamp as the primary key and Discord snowflake/message ID as the stable tie-breaker. This keeps multiple deleted records in the same gap deterministic.
+Each real or saved message uses:
+
+1. original message timestamp as the primary ordering value;
+2. Discord snowflake/message ID as the stable tie-breaker.
+
+When the timestamp is unavailable for a saved record, derive it from the snowflake; only then fall back to the record's capture timestamp.
+
+#### Loaded-window eligibility
+
+Let `oldestLoaded` and `newestLoaded` be the oldest/newest ordering keys among real message rows in the current stream.
+
+The effective render window is:
+
+- lower bound = `oldestLoaded` while `hasMoreBefore === true`;
+- lower bound = negative infinity while `hasMoreBefore === false`;
+- upper bound = `newestLoaded` while `hasMoreAfter === true`;
+- upper bound = positive infinity while `hasMoreAfter === false`.
+
+A saved delete is eligible only when its ordering key is inside that effective window.
+
+Consequences:
+
+- while older history still exists, deletes older than the oldest loaded real message do not appear prematurely;
+- once Discord reaches the beginning (`hasMoreBefore === false`), saved deletes older than the oldest surviving real message may correctly appear at the beginning;
+- at the live end (`hasMoreAfter === false`), saved deletes newer than the newest surviving real message may correctly appear at the end, including a just-deleted newest message or a channel whose later real messages were also deleted;
+- extending history changes only the applicable boundary; already eligible tombstones keep the same ordering relative to real messages.
+
+If there are no real message rows:
+
+- when both `hasMoreBefore === false` and `hasMoreAfter === false`, all non-hidden saved deletes for that channel are eligible and are sorted normally;
+- otherwise render no saved deletes until a real boundary is available, because placement would be ambiguous.
 
 #### No duplicate reinjection
 
-A delete record is considered once per row-stream render. It is never attached to arbitrary load events. Therefore the same persisted record cannot be added once per batch or repeatedly re-dispatched.
+A persisted message identity contributes at most one tombstone to one row-stream render. The overlay is recomputed from storage each render; no per-batch injection state is carried forward.
 
 ### 6. Tombstone row representation
 
@@ -158,7 +180,8 @@ The inline deleted row should resemble the current MessageHistory experience, e.
 Requirements:
 
 - no Discord `EPHEMERAL` flag abuse;
-- no synthetic-message marker required by Discord stores because the row never enters those stores;
+- no Flux-facing synthetic-message marker is needed because the row never enters Discord stores;
+- a plugin-local marker may be attached only to the transient row/MessageRecord so the action-sheet layer can identify a tombstone;
 - preserve original author display information when available;
 - preserve original message timestamp;
 - preserve attachment/embed metadata where practical for local display;
@@ -173,39 +196,39 @@ Inline dismissal is presentation state, not history deletion.
 
 When the user chooses `Hide Deleted Message` on a MessageHistory tombstone:
 
-1. Set that delete record's `inlineHidden` to `true` in MessageHistory storage.
-2. Increment/update a MessageHistory render revision or equivalent plugin-local invalidation signal.
-3. Trigger the smallest safe chat re-render available.
+1. Mark every delete record matching that `channelId + messageId` as `inlineHidden=true`.
+2. Update any plugin-local derived index/revision.
+3. Cause the current channel row stream to regenerate through a non-message-event invalidation path.
 4. Do not dispatch any Discord message event.
 5. Do not mutate Discord stores.
 
 The saved record remains visible in MessageHistory's history/deleted-message browser until normal retention or explicit history deletion removes it.
 
-Repeated dismissals are O(1) storage/state updates plus a bounded render invalidation, not message-store mutation loops.
+Repeated dismissal of an already-hidden tombstone is idempotent and performs no additional work beyond confirming the state.
 
 ### 8. Clearing history
 
-Clearing one record, a channel, or all history must update both persisted records and any plugin-local derived indexes/cache used by the render layer.
+Clearing one message, a channel, or all history updates persisted records and any plugin-local derived index/cache used by the render layer.
 
 Because deleted rows do not live in Discord's stores, there is no synthetic runtime state to reconcile or remove.
 
-Clearing history must cause the inline overlay to stop producing those rows on the next render.
+Clearing history must make affected tombstones absent on the next/current regenerated row stream.
 
 ### 9. Render invalidation
 
 The plugin must not use fake Flux message events as a refresh mechanism.
 
-Preferred order:
+The implementation must locate a safe native/local invalidation surface that causes the active channel's row stream to be regenerated without changing Discord message state. Candidate surfaces may include the native row manager/channel-stream sequencing state, but the exact method is an implementation detail to verify against the current client.
 
-1. identify a native/local channel-stream or row-manager invalidation mechanism that can cause `createChannelStream` to run again;
-2. if available, call the smallest safe invalidation path after MessageHistory presentation state changes;
-3. otherwise rely on the next natural chat render and expose dismissal state immediately in plugin UI while avoiding synthetic Discord message traffic.
+Required behavior:
 
-The implementation plan should verify the exact available runtime hook before choosing an invalidation method.
+- hiding or clearing an inline tombstone updates the currently visible channel without requiring navigation away/reopen;
+- multiple rapid dismissals are coalesced into at most one pending refresh per event-loop/render turn;
+- failure to locate a safe invalidation hook disables immediate inline refresh and logs a bounded diagnostic rather than falling back to synthetic Flux message events.
 
 ### 10. Action-sheet integration
 
-The action-sheet patch should distinguish normal Discord messages from MessageHistory tombstone rows.
+The action-sheet patch distinguishes normal Discord messages from MessageHistory tombstone rows.
 
 For real messages with saved edit/delete history, retain the existing history actions.
 
@@ -214,65 +237,67 @@ For a MessageHistory tombstone, provide at least:
 - `View Message History` (or equivalent existing history action);
 - `Hide Deleted Message`.
 
-Avoid mutating a reused rows array repeatedly. The implementation should include an idempotence guard or generate a new rows array so rerenders cannot duplicate MessageHistory action rows.
+Action-sheet augmentation must be idempotent. It must not repeatedly splice duplicate MessageHistory rows into a reused tree/array on rerender.
 
 ## Data flow
 
 ### Real deletion
 
-`MESSAGE_DELETE` observed -> snapshot current real message -> persist delete record -> original event continues unchanged -> Discord removes its message normally -> future channel render overlays persisted tombstone if eligible.
+`MESSAGE_DELETE` observed -> snapshot current real message -> persist delete record -> original event continues unchanged -> Discord removes its message normally -> row-overlay invalidation/render makes the persisted tombstone visible if eligible.
 
 ### Restart/reopen
 
-Plugin loads persisted records -> Discord loads channel normally -> `createChannelStream` runs -> MessageHistory selects eligible non-hidden delete records for the loaded window -> transient tombstone rows are merged -> no Flux reinjection and no store mutation.
+Plugin loads persisted records -> Discord loads channel normally -> `createChannelStream` runs -> MessageHistory selects eligible non-hidden delete records for the effective window -> transient tombstone rows are merged -> no Flux reinjection and no store mutation.
 
 ### Older-history load
 
-Discord extends its real loaded window -> `createChannelStream` runs again -> additional saved deletes become eligible only when their original positions enter that window -> already visible records remain stably ordered -> no duplicates across batches.
+Discord extends its real loaded window -> `createChannelStream` runs again -> additional saved deletes become eligible only when the boundary reaches them -> already visible records remain stably ordered -> no duplicates across batches.
 
 ### Inline dismissal
 
-Long-press tombstone -> set `inlineHidden=true` -> invalidate/re-render -> overlay omits record -> history browser still contains it.
+Long-press tombstone -> set matching delete records `inlineHidden=true` -> coalesced local row invalidation -> overlay omits tombstone -> history browser still contains the records.
 
 ### Edit
 
-Partial `MESSAGE_UPDATE` observed -> merge with previous full snapshot -> if effective content changed, persist previous content as edit record -> cache merged current state -> Discord processes original update unchanged.
+Partial `MESSAGE_UPDATE` observed -> merge with previous full snapshot -> if effective content changed, persist previous content as an edit record -> cache merged current state -> Discord processes original update unchanged.
 
 ## Failure handling
 
-- If capture cannot resolve the deleted message contents, do not create a malformed tombstone record; log/debug the miss and allow Discord deletion normally.
+- If capture cannot resolve deleted-message contents, do not create a malformed tombstone record; log/debug the miss and allow Discord deletion normally.
 - If row-generation patch discovery fails, MessageHistory still records and exposes history in its browser; inline deleted rendering is disabled rather than falling back to synthetic Flux reinjection.
 - If transient tombstone conversion fails for one record, skip that record for the current render and log a bounded diagnostic; do not fail the entire channel stream.
 - Corrupt/missing optional fields in old persisted records are normalized conservatively.
+- If immediate row invalidation is unavailable, never violate the core invariant to simulate it; inline state will correct on the next natural render and diagnostics will identify the missing capability.
 - Plugin unload removes patches and clears bounded runtime caches only; persisted history follows the existing `persistHistory` behavior.
 
 ## Migration
 
-Existing persisted delete records are retained.
+Existing persisted edit/delete records are retained.
 
 Migration rules:
 
 - missing `inlineHidden` -> `false`;
 - keep existing `messageTimestamp` when present;
-- otherwise derive original placement time from the message snowflake, then fall back to the stored capture timestamp;
+- otherwise derive original placement time from the message snowflake, then fall back to stored capture timestamp;
+- duplicate legacy delete records remain available in history browsing but collapse to one inline tombstone;
 - old synthetic marker/EPHEMERAL assumptions are ignored by the new render path;
-- existing reinjection debug logs may be retained for one version for troubleshooting or removed as dead UI/code during implementation; the implementation plan should prefer removing them if they no longer serve the redesigned architecture.
+- reinjection-specific debug logs/settings/UI are removed because the reinjection architecture no longer exists.
 
-No migration should dispatch messages or attempt to clean synthetic rows from Discord state after restart; the old synthetic rows are session state and disappear naturally when the old plugin code is no longer active/reloaded.
+No migration dispatches messages or attempts to clean synthetic rows from Discord state. Old synthetic rows were session state and disappear naturally when the old plugin implementation unloads/restarts.
 
 ## Code organization
 
-The current `index.ts` mixes capture, persistence coordination, reinjection, action-sheet patching, and lifecycle concerns. The redesign should separate responsibilities enough to make the dangerous logic testable.
+The current `index.ts` mixes capture, persistence coordination, reinjection, action-sheet patching, and lifecycle concerns. The redesign separates these responsibilities so the dangerous logic is independently testable.
 
-Suggested modules:
+Target modules:
 
-- `history.ts`: pure persisted-record operations, normalization, retention, ordering, migration;
-- `capture.ts`: message snapshot/partial-update merge and bounded runtime cache;
-- `overlay.ts`: loaded-window calculation, delete-record eligibility, row conversion/merge, render invalidation helpers;
-- `actions.tsx` or existing UI module: tombstone/history actions and dismissal callbacks;
+- `history.ts`: pure persisted-record operations, normalization, retention, ordering, migration, hide/unhide state;
+- `capture.ts`: snapshot creation, partial-update merge, bounded 750-entry runtime cache;
+- `overlay.ts`: effective-window calculation, candidate deduplication/eligibility, transient row conversion/merge, refresh coalescing;
+- `ui.tsx`/action helper: tombstone/history actions and dismissal callbacks;
 - `index.ts`: module discovery, patch registration, lifecycle wiring only.
 
-Exact filenames can change during implementation if the repo's conventions suggest a better split, but the capture/store/render boundaries should remain explicit.
+`debug.tsx` reinjection-specific functionality is removed unless a small generic diagnostic facility is still required by implementation-time discovery; it must not retain reinjection concepts.
 
 ## Testing strategy
 
@@ -280,52 +305,58 @@ Exact filenames can change during implementation if the repo's conventions sugge
 
 Add deterministic tests for:
 
-- settings/history migration adds `inlineHidden=false` to legacy records;
+- migration adds `inlineHidden=false` to legacy records;
 - hidden delete records are excluded from inline candidates but retained by history queries;
+- legacy duplicate delete records collapse to one inline tombstone;
+- hiding a duplicated legacy message identity hides all matching delete records;
 - original message timestamp/snowflake placement ordering;
-- loaded-window eligibility for records before, inside, and after the current window;
-- records older than the window remain hidden while `hasMoreBefore=true`;
+- effective window bounds for all four `hasMoreBefore/hasMoreAfter` edge combinations;
+- empty real window behavior;
+- records before, inside, and after the effective window;
 - multiple deletes in one gap have stable ordering;
 - repeated row-stream generation does not duplicate tombstones;
 - the same record does not move when older batches extend the window;
 - partial `MESSAGE_UPDATE` merge preserves omitted content/attachments/etc.;
 - metadata-only updates do not create edit-history records;
-- true content edits do create the previous version exactly once;
-- bounded runtime cache evicts old entries;
+- true content edits create the previous version exactly once;
+- 750-entry cache evicts least-recently-used entries;
 - inline dismissal updates only MessageHistory state and leaves the record browsable;
 - repeated dismissals are idempotent;
-- clear-history operations remove overlay candidates immediately;
+- multiple rapid dismissals coalesce refresh work;
+- clear-history operations remove overlay candidates;
 - action-sheet augmentation is idempotent.
 
 ### Integration-style harness
 
 Model a channel with multiple real pagination windows and saved deletes spread across them:
 
-1. Render newest window: only deletes in that window appear.
+1. Render newest window: only deletes in the effective window appear, including legitimate live-edge deletes when `hasMoreAfter=false`.
 2. Extend history backward: newly eligible deletes appear at their original positions; existing ones do not move or duplicate.
-3. Dismiss several visible tombstones in rapid succession: all disappear from overlay state without Flux events.
-4. Re-render and extend history again: dismissed records remain absent.
-5. Simulate app restart by rebuilding runtime state from persisted records: non-hidden deletes return in the correct window; hidden deletes remain hidden.
+3. Reach `hasMoreBefore=false`: legitimate deletes older than the oldest surviving real message appear at the beginning.
+4. Dismiss several visible tombstones in rapid succession: all become hidden with no Flux message events and one coalesced refresh.
+5. Re-render and extend history again: dismissed records remain absent.
+6. Simulate app restart from persisted records: non-hidden deletes return in the correct window; hidden deletes remain hidden.
+7. Simulate duplicate legacy delete records: only one tombstone appears and dismissal prevents all duplicates from returning.
 
-This harness directly covers the user's observed failures.
+This harness directly covers the observed failures.
 
-### Build/runtime verification
+### Build/CI/runtime verification
 
 - existing repository build must pass;
-- MessageHistory pure tests must run in CI rather than existing only as a manual script;
-- on-device verification should test live delete, restart/reopen, older-history load, repeated dismissals, and coexistence with LongScreenshotFix preloading.
+- MessageHistory regression tests must be a normal CI step rather than a manual-only script;
+- on-device verification must cover live delete, restart/reopen, older-history load, channel beginning/end boundaries, repeated rapid dismissals, clearing history, action-sheet rerendering, and coexistence with LongScreenshotFix preloading.
 
 ## Interaction with LongScreenshotFix
 
 The overlay design is intentionally compatible with LongScreenshotFix.
 
-LongScreenshotFix may retain/preload a larger real-message window. MessageHistory simply sees that larger real window during row generation and makes more saved deletes eligible. It does not cache those hundreds of messages indefinitely and does not inject extra load events.
+LongScreenshotFix may retain/preload a larger real-message window. MessageHistory sees that larger real window during row generation and makes additional saved deletes eligible according to the same boundary rules. It does not cache those hundreds of raw messages indefinitely and does not inject extra load events.
 
-The two plugins may both patch `createChannelStream`; implementation must preserve patch composability by always calling the original/next patched function and transforming its returned rows without assuming it is the sole patch.
+Both plugins may patch `createChannelStream`; MessageHistory must call the original/next patched function first and transform the returned rows without assuming it is the sole patch. It must preserve unknown/non-message row descriptors, including LongScreenshotFix behavior.
 
 ## Removed behavior/code
 
-The redesign should delete, not preserve, the old reinjection machinery:
+The redesign deletes, rather than preserves, the old reinjection machinery:
 
 - synthetic `MESSAGE_CREATE`/`MESSAGE_UPDATE` helpers used for reinjection;
 - mutation of real `MESSAGE_DELETE` into `MESSAGE_UPDATE`;
@@ -334,10 +365,10 @@ The redesign should delete, not preserve, the old reinjection machinery:
 - batch reinjection into every `*LOAD*MESSAGE*` event;
 - synthetic-dismiss consumption logic tied to Discord delete events;
 - EPHEMERAL flag usage for MessageHistory tombstones;
-- reinjection-specific debug logging/UI if it is no longer useful;
-- any unbounded raw-message cache behavior.
+- reinjection-specific debug logging/settings/UI;
+- unbounded raw-message cache behavior.
 
-Leaving dormant compatibility paths would reintroduce state ambiguity, so the implementation should prefer one architecture only.
+Leaving dormant compatibility paths would reintroduce state ambiguity, so there is one delete-history architecture only: persisted records plus a render overlay.
 
 ## Success criteria
 
@@ -346,11 +377,12 @@ The redesign is complete when:
 1. Deleting a message causes Discord to receive and process an unchanged `MESSAGE_DELETE`.
 2. The deleted message remains available in persisted MessageHistory storage.
 3. Inline deleted rows are generated only by the render overlay and never appear in Discord's canonical message stores.
-4. After restart, a saved deleted row appears only when its original chronological position is inside the loaded real-message window.
+4. After restart, a saved deleted row appears only when its original chronological position is inside the effective loaded window, including correct open-ended beginning/live-edge behavior.
 5. Loading older history never causes an existing tombstone to jump to another position or duplicate.
 6. Hiding a tombstone removes it from inline chat without deleting its saved history record.
-7. Rapidly hiding multiple tombstones does not dispatch message events or create a growing synthetic-state workload.
+7. Rapidly hiding multiple tombstones dispatches no message events, coalesces refresh work, and creates no growing synthetic-state workload.
 8. Hidden tombstones do not return after later history loads or app restart.
 9. Metadata-only partial message updates do not create false edit-history entries.
-10. Runtime MessageHistory caching remains bounded.
-11. The plugin continues to build and the new regression tests run successfully in CI.
+10. Runtime MessageHistory caching never exceeds 750 snapshots.
+11. Legacy duplicate delete records cannot produce duplicate inline tombstones or defeat dismissal.
+12. The plugin continues to build and the new regression suite runs successfully in CI.
