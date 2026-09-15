@@ -6,8 +6,10 @@ import { showToast } from "@vendetta/ui/toasts";
 import { findInReactTree } from "@vendetta/utils";
 
 import {
+    CAPTURE_SUBSCRIPTION_TYPES,
     RecentMessageCache,
     contentChanged,
+    getDeleteEventTargets,
     mergeMessageUpdate,
     snapshotMessage,
 } from "./capture";
@@ -36,7 +38,7 @@ const messageCache = new RecentMessageCache();
 const handledDispatchEvents = new WeakSet<object>();
 const overlayMessages = new WeakSet<object>();
 const currentSessionDeleteRecordIds = new Set<string>();
-const FLUX_DISPATCH_METHODS = ["dispatch", "dirtyDispatch", "maybeDispatch"];
+const FALLBACK_FLUX_DISPATCH_METHODS = ["dispatch", "dirtyDispatch", "maybeDispatch"];
 const HISTORY_ACTION_LABELS = new Set(["View Edit History", "View Message History", "Clear Message History", "Hide Deleted Message"]);
 
 const ActionSheet = findByProps("openLazy", "hideActionSheet");
@@ -145,6 +147,29 @@ function rememberMessages(messages: any[] | undefined, fallbackChannelId?: strin
     for (const message of messages) rememberMessage(message, fallbackChannelId);
 }
 
+function warmMessageCacheFromLoadedChannels() {
+    try {
+        const loaded = ChannelMessages?._channelMessages;
+        if (!loaded) return;
+
+        const channelCollections = loaded instanceof Map ? [...loaded.values()] : Object.values(loaded);
+        for (const collection of channelCollections as any[]) {
+            const channelId = collection?.channelId;
+            let messages: any[] | undefined;
+
+            try {
+                const array = collection?.toArray?.();
+                if (Array.isArray(array)) messages = array;
+            } catch {}
+
+            if (!messages && Array.isArray(collection?._array)) messages = collection._array;
+            rememberMessages(messages, channelId);
+        }
+    } catch (error) {
+        console.error("[MessageHistory] initial message-cache warmup failed", error);
+    }
+}
+
 function recordUpdate(event: any) {
     const settingsValue = normalizeSettings(storage.settings);
     const { channelId: eventChannelId, messageId } = getEventMessageIdentity(event);
@@ -168,17 +193,15 @@ function recordUpdate(event: any) {
     if (next) rememberMessage(merged, channelId);
 }
 
-function recordDelete(event: any) {
-    const { channelId, messageId } = getEventMessageIdentity(event);
-    if (!channelId || !messageId) return;
-
+function recordDeleteTarget(channelId: string, messageId: string, event?: any) {
     const cached = messageCache.get(channelId, messageId);
     messageCache.delete(channelId, messageId);
 
     const settingsValue = normalizeSettings(storage.settings);
     if (!settingsValue.logDeletes) return;
 
-    const original = cached?.raw ?? getStoredMessage(channelId, messageId) ?? event.message;
+    const eventMessage = event?.message?.id === messageId ? event.message : null;
+    const original = cached?.raw ?? getStoredMessage(channelId, messageId) ?? eventMessage;
     const snapshot = cached ?? snapshotMessage(original, channelId);
     if (!snapshot || !hasVisibleContent(snapshot)) return;
 
@@ -187,6 +210,12 @@ function recordDelete(event: any) {
     currentSessionDeleteRecordIds.add(record.id);
     saveRecord(record);
     overlayRefresh.request();
+}
+
+function recordDelete(event: any) {
+    for (const target of getDeleteEventTargets(event)) {
+        recordDeleteTarget(target.channelId, target.messageId, event);
+    }
 }
 
 function markDispatchEventHandled(event: any): boolean {
@@ -199,7 +228,7 @@ function markDispatchEventHandled(event: any): boolean {
 function handleDispatchEvent(event: any) {
     if (!event?.type || markDispatchEventHandled(event)) return;
 
-    if (event.type === "MESSAGE_DELETE") {
+    if (event.type === "MESSAGE_DELETE" || event.type === "MESSAGE_DELETE_BULK") {
         recordDelete(event);
         return;
     }
@@ -213,18 +242,120 @@ function handleDispatchEvent(event: any) {
     rememberMessages(event.messages, event.channelId);
 }
 
-function patchFluxDispatcher() {
-    const methods = FLUX_DISPATCH_METHODS.filter((method) => typeof FluxDispatcher?.[method] === "function");
+function resolveFluxDispatcher(): any {
+    const imported = FluxDispatcher as any;
+    if (imported && typeof imported.dispatch === "function" && Array.isArray(imported._interceptors)) {
+        return imported;
+    }
+
+    try {
+        const discovered = findByProps("_interceptors", "_subscriptions");
+        if (discovered && typeof discovered.dispatch === "function") return discovered;
+    } catch {}
+
+    try {
+        const discovered = findByProps("_interceptors");
+        if (discovered && typeof discovered.dispatch === "function") return discovered;
+    } catch {}
+
+    return imported;
+}
+
+function installFluxInterceptor(dispatcher: any): boolean {
+    if (!dispatcher || typeof dispatcher.addInterceptor !== "function") return false;
+
+    const interceptor = (event: any) => {
+        try {
+            handleDispatchEvent(event);
+        } catch (error) {
+            console.error("[MessageHistory] Flux interceptor capture failed", error);
+        }
+        return false;
+    };
+
+    try {
+        dispatcher.addInterceptor(interceptor);
+        unpatches.push(() => {
+            try {
+                const interceptors = dispatcher?._interceptors;
+                if (!Array.isArray(interceptors)) return;
+                const index = interceptors.indexOf(interceptor);
+                if (index >= 0) interceptors.splice(index, 1);
+            } catch {}
+        });
+        return true;
+    } catch (error) {
+        console.error("[MessageHistory] failed to install Flux interceptor", error);
+        return false;
+    }
+}
+
+function installFluxSubscriptions(dispatcher: any): boolean {
+    if (!dispatcher || typeof dispatcher.subscribe !== "function" || typeof dispatcher.unsubscribe !== "function") {
+        return false;
+    }
+
+    let installed = 0;
+    for (const type of CAPTURE_SUBSCRIPTION_TYPES) {
+        const callback = (event: any) => {
+            try {
+                handleDispatchEvent(event);
+            } catch (error) {
+                console.error(`[MessageHistory] ${type} subscription capture failed`, error);
+            }
+        };
+
+        try {
+            dispatcher.subscribe(type, callback);
+            installed++;
+            unpatches.push(() => {
+                try {
+                    dispatcher.unsubscribe(type, callback);
+                } catch {}
+            });
+        } catch (error) {
+            console.error(`[MessageHistory] failed to subscribe to ${type}`, error);
+        }
+    }
+
+    return installed > 0;
+}
+
+function installDispatchPatchFallback(dispatcher: any) {
+    const methods = FALLBACK_FLUX_DISPATCH_METHODS.filter((method) => typeof dispatcher?.[method] === "function");
     for (const method of methods) {
         safePushUnpatch(() =>
-            before(method, FluxDispatcher, (args: any[]) => {
+            before(method, dispatcher, (args: any[]) => {
                 try {
                     handleDispatchEvent(args[0]);
                 } catch (error) {
-                    console.error(`[MessageHistory] ${method} capture failed`, error);
+                    console.error(`[MessageHistory] ${method} fallback capture failed`, error);
                 }
                 return args;
             }),
+        );
+    }
+}
+
+function installFluxCapture() {
+    const dispatcher = resolveFluxDispatcher();
+    if (!dispatcher) {
+        console.error("[MessageHistory] Flux dispatcher unavailable; edit/delete capture disabled");
+        return;
+    }
+
+    const interceptorInstalled = installFluxInterceptor(dispatcher);
+    const subscriptionsInstalled = installFluxSubscriptions(dispatcher);
+
+    if (!interceptorInstalled) {
+        installDispatchPatchFallback(dispatcher);
+    }
+
+    if (!interceptorInstalled && !subscriptionsInstalled) {
+        console.error("[MessageHistory] no Flux capture surface was available");
+    } else {
+        console.log(
+            `[MessageHistory] capture ready (interceptor=${interceptorInstalled}, subscriptions=${subscriptionsInstalled})`,
         );
     }
 }
@@ -444,12 +575,13 @@ export default {
         currentSessionDeleteRecordIds.clear();
         ensureStorage();
         resetOverlayRefresh();
+        warmMessageCacheFromLoadedChannels();
         unbindRuntime?.();
         unbindRuntime = bindMessageHistoryRuntime({
             clearAllHistory,
             requestOverlayRefresh: () => overlayRefresh.request(),
         });
-        patchFluxDispatcher();
+        installFluxCapture();
         patchDeletedMessageOverlay();
         patchActionSheet();
     },
