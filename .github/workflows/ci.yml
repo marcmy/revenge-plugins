@@ -46,5 +46,13 @@ jobs:
         # Trivy still scans the full lockfile, while this gate protects shipped deps.
         run: npm audit --omit=dev --audit-level=high
 
+      - name: Test MessageHistory visibility
+        run: |
+          mkdir -p .codex-tmp/MessageHistory
+          npx esbuild plugins/MessageHistory/src/history.ts --bundle --platform=node --format=esm --outfile=.codex-tmp/MessageHistory/history.mjs
+          npx esbuild plugins/MessageHistory/src/settingsOptions.ts --bundle --platform=node --format=esm --outfile=.codex-tmp/MessageHistory/settingsOptions.mjs
+          node scripts/check-message-history-retention.mjs
+          node scripts/check-message-history-visibility.mjs
+
       - name: Build plugins
         run: npm run build
