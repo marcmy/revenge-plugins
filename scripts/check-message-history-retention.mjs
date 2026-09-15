@@ -2,12 +2,16 @@ import {
   addRecord,
   clearMessageKindRecords,
   createRecord,
+  createSyntheticDeletedCreateEvent,
+  createSyntheticDeletedMessage,
   getEventMessageIdentity,
   getKindRecords,
   getMessageRecords,
   getRecordMessageTimestamp,
+  isSyntheticDeletedMessage,
   normalizeSettings,
   pruneRecords,
+  shouldConsumeSyntheticDeletedDismiss,
   sortOldestByMessageTime,
 } from "../.codex-tmp/MessageHistory/history.mjs";
 import { cycleNumericSetting, nextOptionValue, selectNumericSetting } from "../.codex-tmp/MessageHistory/settingsOptions.mjs";
@@ -17,6 +21,7 @@ const settings = {
   logDeletes: true,
   persistHistory: true,
   showDeletedInChannelsAfterRestart: false,
+  debugReinject: false,
   maxTotalRecords: 200,
   maxRecordsPerChannel: 50,
   maxRecordsPerMessage: 10,
@@ -83,7 +88,55 @@ if (deleteRecords.length !== 1 || deleteRecords[0].messageId !== "deleted-messag
 }
 
 if (normalizeSettings({}).showDeletedInChannelsAfterRestart !== false) {
-  throw new Error("Expected inline saved-delete rendering to default off");
+  throw new Error("Expected channel reinjection to default off");
+}
+
+if (normalizeSettings({}).debugReinject !== false) {
+  throw new Error("Expected reinject debugging to default off");
+}
+
+const syntheticDelete = createSyntheticDeletedMessage(deleteRecords[0]);
+if (
+  syntheticDelete.id !== "deleted-message" ||
+  syntheticDelete.channel_id !== "channel-1" ||
+  syntheticDelete.content !== "[deleted] gone" ||
+  syntheticDelete.author.id !== "user-1"
+) {
+  throw new Error("Expected synthetic deleted message to preserve record identity and content");
+}
+
+if (syntheticDelete.message_history_synthetic_deleted !== true) {
+  throw new Error("Expected synthetic deleted message to carry a local marker");
+}
+
+if (!isSyntheticDeletedMessage(syntheticDelete)) {
+  throw new Error("Expected synthetic deleted messages to be recognized by the dismiss guard");
+}
+
+if (isSyntheticDeletedMessage({ id: "normal-message", flags: 64, content: "normal ephemeral notice" })) {
+  throw new Error("Expected non-history ephemeral messages to stay outside the dismiss guard");
+}
+
+if (!shouldConsumeSyntheticDeletedDismiss({ hasSavedDeleteRecord: true, trackedSyntheticMessage: true })) {
+  throw new Error("Expected saved synthetic deleted rows to be dismissable");
+}
+
+if (shouldConsumeSyntheticDeletedDismiss({ hasSavedDeleteRecord: true, trackedSyntheticMessage: true, protectedRecentDelete: true })) {
+  throw new Error("Expected fresh delete echoes to be protected from dismiss cleanup");
+}
+
+if (shouldConsumeSyntheticDeletedDismiss({ hasSavedDeleteRecord: false, trackedSyntheticMessage: true })) {
+  throw new Error("Expected synthetic-looking rows without saved history to be ignored");
+}
+
+const syntheticCreateEvent = createSyntheticDeletedCreateEvent(deleteRecords[0]);
+if (
+  syntheticCreateEvent.type !== "MESSAGE_CREATE" ||
+  syntheticCreateEvent.channelId !== "channel-1" ||
+  syntheticCreateEvent.message.id !== "deleted-message" ||
+  syntheticCreateEvent.otherPluginBypass !== true
+) {
+  throw new Error("Expected synthetic deleted record to create a guarded MESSAGE_CREATE event");
 }
 
 const nestedDeleteIdentity = getEventMessageIdentity({
@@ -121,8 +174,10 @@ const timestampedDeleteRecord = createRecord(
 if (timestampedDeleteRecord.messageTimestamp !== Date.parse(originalMessageTimestamp)) {
   throw new Error("Expected delete records to retain the original message timestamp");
 }
-if (getRecordMessageTimestamp(timestampedDeleteRecord) !== Date.parse(originalMessageTimestamp)) {
-  throw new Error("Expected overlay placement to use the original message timestamp");
+
+const timestampedSyntheticDelete = createSyntheticDeletedMessage(timestampedDeleteRecord);
+if (timestampedSyntheticDelete.timestamp !== originalMessageTimestamp) {
+  throw new Error("Expected synthetic deleted messages to display at the original message timestamp");
 }
 
 const discordEpoch = 1_420_070_400_000n;
@@ -136,7 +191,7 @@ const olderRecord = createRecord("delete", { ...base, id: "older", timestamp: "2
 const newerRecord = createRecord("delete", { ...base, id: "newer", timestamp: "2026-05-31T17:00:00.000Z" }, deleteLoggedAt + 1);
 const sortedByMessageTime = sortOldestByMessageTime([newerRecord, olderRecord]);
 if (sortedByMessageTime[0].messageId !== "older" || sortedByMessageTime[1].messageId !== "newer") {
-  throw new Error("Expected saved deletes to sort by original message time from oldest to newest");
+  throw new Error("Expected reinjected records to sort by original message time from oldest to newest");
 }
 
 const mixedState = {
@@ -148,13 +203,13 @@ const mixedState = {
 };
 const deleteClearedState = clearMessageKindRecords(mixedState, "channel-1", "mixed-message", "delete");
 if (getKindRecords(deleteClearedState, "delete").some((record) => record.messageId === "mixed-message")) {
-  throw new Error("Expected kind-specific clearing to remove the selected delete records");
+  throw new Error("Expected dismiss cleanup to remove delete records for the dismissed message");
 }
 if (!getKindRecords(deleteClearedState, "edit").some((record) => record.messageId === "mixed-message")) {
-  throw new Error("Expected kind-specific clearing to keep edit records for the same message");
+  throw new Error("Expected dismiss cleanup to keep edit records for the dismissed message");
 }
 if (!getKindRecords(deleteClearedState, "delete").some((record) => record.messageId === "other-message")) {
-  throw new Error("Expected kind-specific clearing to keep other messages' delete records");
+  throw new Error("Expected dismiss cleanup to keep other messages' delete records");
 }
 
 console.log("message history retention ok");

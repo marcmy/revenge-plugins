@@ -5,6 +5,7 @@ export interface MessageHistorySettings {
     logDeletes: boolean;
     persistHistory: boolean;
     showDeletedInChannelsAfterRestart: boolean;
+    debugReinject: boolean;
     maxTotalRecords: number;
     maxRecordsPerChannel: number;
     maxRecordsPerMessage: number;
@@ -37,9 +38,29 @@ export interface HistoryRecord {
     embeds: any[];
     timestamp: number;
     messageTimestamp?: number | null;
-    inlineHidden?: boolean;
 }
 
 export interface HistoryState {
     records: HistoryRecord[];
+}
+
+export interface ReinjectDebugEvent {
+    id: string;
+    timestamp: number;
+    method: string;
+    type: string;
+    channelId?: string | null;
+    messageId?: string | null;
+    messageChannelId?: string | null;
+    messagesLength?: number | null;
+    firstMessageId?: string | null;
+    firstMessageTimestamp?: string | number | null;
+    lastMessageId?: string | null;
+    lastMessageTimestamp?: string | number | null;
+    hasMessage: boolean;
+    hasMessages: boolean;
+    hasSavedDeletesForChannel: boolean;
+    savedDeletesForChannel: number;
+    eventKeys: string[];
+    extra?: Record<string, string | number | boolean | null>;
 }
