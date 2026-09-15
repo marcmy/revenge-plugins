@@ -61,7 +61,13 @@ export class RecentMessageCache {
     }
 
     get(channelId: string, messageId: string): MessageSnapshot | undefined {
-        return this.entries.get(messageKey(channelId, messageId));
+        const key = messageKey(channelId, messageId);
+        const snapshot = this.entries.get(key);
+        if (!snapshot) return undefined;
+
+        this.entries.delete(key);
+        this.entries.set(key, snapshot);
+        return snapshot;
     }
 
     set(message: any, fallbackChannelId?: string): MessageSnapshot | null {
