@@ -146,6 +146,18 @@ const closedNewerEdge = mergeDeletedRows(
 );
 assertIds(closedNewerEdge, ["300", "400", "450"], "closed newer edge");
 
+const emptyClosed = mergeDeletedRows([], records, tombstone, {
+  hasMoreBefore: false,
+  hasMoreAfter: false,
+});
+assertIds(emptyClosed, ["150", "350", "450"], "empty fully loaded channel");
+
+const emptyAmbiguous = mergeDeletedRows([], records, tombstone, {
+  hasMoreBefore: true,
+  hasMoreAfter: false,
+});
+assertIds(emptyAmbiguous, [], "empty channel with an open history boundary");
+
 let refreshes = 0;
 const scheduler = createRenderRefreshScheduler(() => refreshes++, 0);
 scheduler.request();
