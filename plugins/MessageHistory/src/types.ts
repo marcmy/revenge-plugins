@@ -38,6 +38,7 @@ export interface HistoryRecord {
     embeds: any[];
     timestamp: number;
     messageTimestamp?: number | null;
+    inlineHidden?: boolean;
 }
 
 export interface HistoryState {
