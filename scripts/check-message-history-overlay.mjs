@@ -190,6 +190,32 @@ for (const token of ['findByName("createChannelStream"', "RecentMessageCache", "
   }
 }
 
+const recordDeleteStart = indexSource.indexOf("function recordDelete");
+const recordDeleteEnd = indexSource.indexOf("function markDispatchEventHandled", recordDeleteStart);
+const recordDeleteSource = indexSource.slice(recordDeleteStart, recordDeleteEnd);
+const cacheDeleteIndex = recordDeleteSource.indexOf("messageCache.delete");
+const logGateIndex = recordDeleteSource.indexOf("!settingsValue.logDeletes");
+if (cacheDeleteIndex < 0 || (logGateIndex >= 0 && cacheDeleteIndex > logGateIndex)) {
+  throw new Error("Expected MESSAGE_DELETE to evict capture cache state even when delete logging is disabled");
+}
+
+const snapshotMergeStart = indexSource.indexOf("function snapshotToMergeableMessage");
+const snapshotMergeEnd = indexSource.indexOf("function rememberMessage", snapshotMergeStart);
+const snapshotMergeSource = indexSource.slice(snapshotMergeStart, snapshotMergeEnd);
+if (snapshotMergeSource.includes("return raw")) {
+  throw new Error("Expected snapshot merge reconstruction not to trust raw Discord record spreading");
+}
+
+if (!indexSource.includes("function resetOverlayRefresh")) {
+  throw new Error("Expected overlay refresh scheduler to be recreated when the plugin is re-enabled");
+}
+const onLoadStart = indexSource.indexOf("onLoad()");
+const onUnloadStart = indexSource.indexOf("onUnload()", onLoadStart);
+const onLoadSource = indexSource.slice(onLoadStart, onUnloadStart);
+if (!onLoadSource.includes("resetOverlayRefresh()")) {
+  throw new Error("Expected onLoad to reset the overlay refresh scheduler after a prior unload");
+}
+
 const historySource = readFileSync("plugins/MessageHistory/src/history.ts", "utf8");
 const settingsSource = readFileSync("plugins/MessageHistory/src/settings.tsx", "utf8");
 const typesSource = readFileSync("plugins/MessageHistory/src/types.ts", "utf8");
