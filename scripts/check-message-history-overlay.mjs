@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 
 import {
+  getInlineDeleteRecords,
+  getKindRecords,
+  setDeleteInlineHidden,
+} from "../.codex-tmp/MessageHistory/history.mjs";
+import {
   createRenderRefreshScheduler,
   getLoadedMessageWindow,
   mergeDeletedRows,
@@ -157,6 +162,62 @@ const emptyAmbiguous = mergeDeletedRows([], records, tombstone, {
   hasMoreAfter: false,
 });
 assertIds(emptyAmbiguous, [], "empty channel with an open history boundary");
+
+// Reproduce the old failure sequence: render, extend history, dismiss several rows,
+// extend again, then rebuild runtime state from persisted records as after a restart.
+let persistedState = {
+  records: [
+    ...records,
+    deleteRecord("250", "2026-09-14T20:25:00.000Z"),
+  ],
+};
+const firstPass = mergeDeletedRows(
+  newestRows,
+  getInlineDeleteRecords(persistedState, "c"),
+  tombstone,
+  { hasMoreBefore: true, hasMoreAfter: false },
+);
+assertIds(firstPass, ["300", "350", "400", "450"], "regression newest pass");
+
+const olderPass = mergeDeletedRows(
+  extendedRows,
+  getInlineDeleteRecords(persistedState, "c"),
+  tombstone,
+  { hasMoreBefore: false, hasMoreAfter: false },
+);
+assertIds(olderPass, ["100", "150", "200", "250", "300", "350", "400", "450"], "regression older pass");
+
+for (const messageId of ["150", "350", "450"]) {
+  persistedState = setDeleteInlineHidden(persistedState, "c", messageId, true);
+}
+if (getKindRecords(persistedState, "delete").length !== 4) {
+  throw new Error("Expected rapid inline dismissals to keep all saved delete history records");
+}
+
+const afterDismissNewest = mergeDeletedRows(
+  newestRows,
+  getInlineDeleteRecords(persistedState, "c"),
+  tombstone,
+  { hasMoreBefore: true, hasMoreAfter: false },
+);
+assertIds(afterDismissNewest, ["300", "400"], "regression newest after dismiss");
+
+const afterDismissOlder = mergeDeletedRows(
+  extendedRows,
+  getInlineDeleteRecords(persistedState, "c"),
+  tombstone,
+  { hasMoreBefore: false, hasMoreAfter: false },
+);
+assertIds(afterDismissOlder, ["100", "200", "250", "300", "400"], "regression older after dismiss");
+
+const restartedState = { records: JSON.parse(JSON.stringify(persistedState.records)) };
+const afterRestart = mergeDeletedRows(
+  extendedRows,
+  getInlineDeleteRecords(restartedState, "c"),
+  tombstone,
+  { hasMoreBefore: false, hasMoreAfter: false },
+);
+assertIds(afterRestart, ["100", "200", "250", "300", "400"], "regression persisted dismiss after restart");
 
 let refreshes = 0;
 const scheduler = createRenderRefreshScheduler(() => refreshes++, 0);
