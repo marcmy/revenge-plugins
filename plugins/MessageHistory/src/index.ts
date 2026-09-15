@@ -46,13 +46,22 @@ const RowGeneratorConstants = findByProps("RowType", "LoadingType", "SeparatorTy
 
 let unbindRuntime: (() => void) | undefined;
 
-const overlayRefresh = createRenderRefreshScheduler(() => {
-    try {
-        MessageStore?.emitChange?.();
-    } catch (error) {
-        console.error("[MessageHistory] chat refresh failed", error);
-    }
-});
+function createOverlayRefresh() {
+    return createRenderRefreshScheduler(() => {
+        try {
+            MessageStore?.emitChange?.();
+        } catch (error) {
+            console.error("[MessageHistory] chat refresh failed", error);
+        }
+    });
+}
+
+let overlayRefresh = createOverlayRefresh();
+
+function resetOverlayRefresh() {
+    overlayRefresh.dispose();
+    overlayRefresh = createOverlayRefresh();
+}
 
 function ensureStorage() {
     const nextSettings = normalizeSettings(storage.settings);
@@ -109,16 +118,13 @@ function getPreviousSnapshot(channelId: string, messageId: string): MessageSnaps
 }
 
 function snapshotToMergeableMessage(snapshot: MessageSnapshot): any {
-    const raw = snapshot.raw;
-    if (raw && typeof raw === "object" && Object.keys(raw).length > 0) return raw;
-
     return {
         id: snapshot.id,
         channel_id: snapshot.channelId,
         guild_id: snapshot.guildId ?? null,
         content: snapshot.content,
-        attachments: snapshot.attachments,
-        embeds: snapshot.embeds,
+        attachments: [...snapshot.attachments],
+        embeds: [...snapshot.embeds],
         timestamp: snapshot.timestamp,
         author: {
             id: snapshot.authorId ?? "0",
@@ -161,14 +167,16 @@ function recordUpdate(event: any) {
 
 function recordDelete(event: any) {
     const { channelId, messageId } = getEventMessageIdentity(event);
-    const settingsValue = normalizeSettings(storage.settings);
-    if (!settingsValue.logDeletes || !channelId || !messageId) return;
+    if (!channelId || !messageId) return;
 
     const cached = messageCache.get(channelId, messageId);
+    messageCache.delete(channelId, messageId);
+
+    const settingsValue = normalizeSettings(storage.settings);
+    if (!settingsValue.logDeletes) return;
+
     const original = cached?.raw ?? getStoredMessage(channelId, messageId) ?? event.message;
     const snapshot = cached ?? snapshotMessage(original, channelId);
-
-    messageCache.delete(channelId, messageId);
     if (!snapshot || !hasVisibleContent(snapshot)) return;
 
     const guildId = ChannelStore?.getChannel?.(snapshot.channelId)?.guild_id ?? snapshot.guildId ?? null;
@@ -422,6 +430,7 @@ function patchActionSheet() {
 export default {
     onLoad() {
         ensureStorage();
+        resetOverlayRefresh();
         unbindRuntime?.();
         unbindRuntime = bindMessageHistoryRuntime({
             clearAllHistory,
