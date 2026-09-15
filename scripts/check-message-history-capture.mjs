@@ -21,7 +21,7 @@ const metadataOnly = mergeMessageUpdate(original, {
   channel_id: "10",
   embeds: [{ type: "rich", title: "hydrated" }],
 });
-if (metadataOnly.content !== "hello" || metadataOnly.attachments.length !== 1) {
+if (metadataOnly.content !== "hello" || metadataOnly.attachments.length !== 1 || metadataOnly.timestamp !== original.timestamp) {
   throw new Error("Expected partial updates to preserve omitted message fields");
 }
 if (contentChanged(snapshotMessage(original), snapshotMessage(metadataOnly))) {
@@ -62,6 +62,21 @@ if (cache.get("10", "1000")) {
 const newestId = String(1000 + MESSAGE_CACHE_LIMIT + 19);
 if (!cache.get("10", newestId)) {
   throw new Error("Expected newest cache entry to remain available");
+}
+
+const lru = new RecentMessageCache(3);
+lru.set({ ...original, id: "1" });
+lru.set({ ...original, id: "2" });
+lru.set({ ...original, id: "3" });
+if (!lru.get("10", "1")) {
+  throw new Error("Expected LRU probe entry to exist before eviction");
+}
+lru.set({ ...original, id: "4" });
+if (lru.get("10", "2")) {
+  throw new Error("Expected least-recently-used entry to be evicted after a cache hit refreshes recency");
+}
+if (!lru.get("10", "1") || !lru.get("10", "3") || !lru.get("10", "4")) {
+  throw new Error("Expected recently used cache entries to survive LRU eviction");
 }
 
 cache.clear();
