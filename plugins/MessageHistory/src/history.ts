@@ -120,6 +120,19 @@ export function getInlineDeleteRecords(state: HistoryState, channelId: string): 
     );
 }
 
+export function getRenderableDeleteRecords(
+    state: HistoryState,
+    channelId: string,
+    options: {
+        showSavedAfterRestart: boolean;
+        currentSessionRecordIds: ReadonlySet<string>;
+    },
+): HistoryRecord[] {
+    const records = getInlineDeleteRecords(state, channelId);
+    if (options.showSavedAfterRestart) return records;
+    return records.filter((record) => options.currentSessionRecordIds.has(record.id));
+}
+
 export function setDeleteInlineHidden(
     state: HistoryState,
     channelId: string,
