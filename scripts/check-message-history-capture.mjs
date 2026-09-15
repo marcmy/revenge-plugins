@@ -1,10 +1,51 @@
 import {
+  CAPTURE_SUBSCRIPTION_TYPES,
   MESSAGE_CACHE_LIMIT,
   RecentMessageCache,
   contentChanged,
+  getDeleteEventTargets,
   mergeMessageUpdate,
   snapshotMessage,
 } from "../.codex-tmp/MessageHistory/capture.mjs";
+
+const requiredCaptureTypes = [
+  "MESSAGE_CREATE",
+  "MESSAGE_UPDATE",
+  "MESSAGE_DELETE",
+  "MESSAGE_DELETE_BULK",
+  "LOAD_MESSAGES_SUCCESS",
+  "LOCAL_MESSAGES_LOADED",
+];
+for (const type of requiredCaptureTypes) {
+  if (!CAPTURE_SUBSCRIPTION_TYPES.includes(type)) {
+    throw new Error(`Expected capture subscription fallback to include ${type}`);
+  }
+}
+
+const singleDeleteTargets = getDeleteEventTargets({
+  type: "MESSAGE_DELETE",
+  channelId: "10",
+  id: "100",
+});
+if (
+  singleDeleteTargets.length !== 1 ||
+  singleDeleteTargets[0].channelId !== "10" ||
+  singleDeleteTargets[0].messageId !== "100"
+) {
+  throw new Error("Expected single MESSAGE_DELETE target extraction");
+}
+
+const bulkDeleteTargets = getDeleteEventTargets({
+  type: "MESSAGE_DELETE_BULK",
+  channelId: "10",
+  ids: ["100", "101", "102"],
+});
+if (
+  bulkDeleteTargets.length !== 3 ||
+  bulkDeleteTargets.some((target, index) => target.channelId !== "10" || target.messageId !== String(100 + index))
+) {
+  throw new Error("Expected MESSAGE_DELETE_BULK target extraction");
+}
 
 const original = {
   id: "100",
