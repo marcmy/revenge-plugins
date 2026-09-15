@@ -1,4 +1,4 @@
-import { findByProps, findByStoreName } from "@vendetta/metro";
+import { findByName, findByProps, findByStoreName } from "@vendetta/metro";
 import { after, before, instead } from "@vendetta/patcher";
 
 const TARGET_MESSAGES = 500;
@@ -11,6 +11,7 @@ const unpatches: Array<() => void> = [];
 let preloadTimer: ReturnType<typeof setTimeout> | undefined;
 let preloadGeneration = 0;
 let internalFetchDepth = 0;
+let activePreload: { channelId: string; generation: number } | undefined;
 let unloaded = false;
 
 let MessageActions: any;
@@ -104,6 +105,11 @@ function getOldestMessageId(messages: any): string | undefined {
     return messages?._array?.[0]?.id;
 }
 
+function filterInternalPreloadRows(rows: any, channelId?: string) {
+    if (!Array.isArray(rows) || !channelId || activePreload?.channelId !== channelId) return rows;
+    return rows.filter((row: any) => row?.rowType !== "load_before");
+}
+
 async function waitForFetchToSettle(channelId: string, previousCount: number) {
     for (let attempt = 0; attempt < 20 && !unloaded; attempt++) {
         await delay(100);
@@ -116,70 +122,77 @@ async function waitForFetchToSettle(channelId: string, previousCount: number) {
 
 async function preloadChannel(channelId: string, generation: number) {
     resolveModules();
-    if (!MessageActions?.fetchMessages || !channelId) return;
+    if (!MessageActions?.fetchMessages || !channelId || generation !== preloadGeneration) return;
 
-    let stalledFetches = 0;
-    let fetches = 0;
+    const preload = { channelId, generation };
+    activePreload = preload;
 
-    while (!unloaded && generation === preloadGeneration) {
-        const selectedChannelId = getSelectedChannelId();
-        if (selectedChannelId && selectedChannelId !== channelId) return;
+    try {
+        let stalledFetches = 0;
+        let fetches = 0;
 
-        const messages = getChannelMessages(channelId);
-        if (!messages) return;
+        while (!unloaded && generation === preloadGeneration) {
+            const selectedChannelId = getSelectedChannelId();
+            if (selectedChannelId && selectedChannelId !== channelId) return;
 
-        const loadedCount = getLoadedCount(messages);
-        if (loadedCount >= TARGET_MESSAGES || messages.hasMoreBefore === false) {
-            if (fetches > 0) {
-                log(`preloaded ${loadedCount} messages in ${channelId} with ${fetches} extra fetch(es)`);
-            }
-            return;
-        }
+            const messages = getChannelMessages(channelId);
+            if (!messages) return;
 
-        if (messages.loadingMore) {
-            await delay(FETCH_SETTLE_DELAY_MS);
-            continue;
-        }
-
-        const oldestMessageId = getOldestMessageId(messages);
-        if (!oldestMessageId) return;
-
-        const limit = Math.max(1, Math.min(FETCH_BATCH_SIZE, TARGET_MESSAGES - loadedCount));
-
-        try {
-            internalFetchDepth++;
-            const result = MessageActions.fetchMessages({
-                channelId,
-                before: oldestMessageId,
-                limit,
-            });
-
-            if (result && typeof result.then === "function") {
-                await result;
-            }
-        } catch (error) {
-            console.error("[LongScreenshotFix] history preload failed", error);
-            return;
-        } finally {
-            internalFetchDepth--;
-        }
-
-        fetches++;
-        await waitForFetchToSettle(channelId, loadedCount);
-
-        const nextMessages = getChannelMessages(channelId);
-        const nextCount = getLoadedCount(nextMessages);
-        if (nextCount <= loadedCount) {
-            stalledFetches++;
-            if (stalledFetches >= MAX_STALLED_FETCHES) {
-                log(`stopped preloading ${channelId}: no additional messages were retained`);
+            const loadedCount = getLoadedCount(messages);
+            if (loadedCount >= TARGET_MESSAGES || messages.hasMoreBefore === false) {
+                if (fetches > 0) {
+                    log(`preloaded ${loadedCount} messages in ${channelId} with ${fetches} extra fetch(es)`);
+                }
                 return;
             }
-        } else {
-            stalledFetches = 0;
-        }
 
-        await delay(FETCH_SETTLE_DELAY_MS);
+            if (messages.loadingMore) {
+                await delay(FETCH_SETTLE_DELAY_MS);
+                continue;
+            }
+
+            const oldestMessageId = getOldestMessageId(messages);
+            if (!oldestMessageId) return;
+
+            const limit = Math.max(1, Math.min(FETCH_BATCH_SIZE, TARGET_MESSAGES - loadedCount));
+
+            try {
+                internalFetchDepth++;
+                const result = MessageActions.fetchMessages({
+                    channelId,
+                    before: oldestMessageId,
+                    limit,
+                });
+
+                if (result && typeof result.then === "function") {
+                    await result;
+                }
+            } catch (error) {
+                console.error("[LongScreenshotFix] history preload failed", error);
+                return;
+            } finally {
+                internalFetchDepth--;
+            }
+
+            fetches++;
+            await waitForFetchToSettle(channelId, loadedCount);
+
+            const nextMessages = getChannelMessages(channelId);
+            const nextCount = getLoadedCount(nextMessages);
+            if (nextCount <= loadedCount) {
+                stalledFetches++;
+                if (stalledFetches >= MAX_STALLED_FETCHES) {
+                    log(`stopped preloading ${channelId}: no additional messages were retained`);
+                    return;
+                }
+            } else {
+                stalledFetches = 0;
+            }
+
+            await delay(FETCH_SETTLE_DELAY_MS);
+        }
+    } finally {
+        if (activePreload === preload) activePreload = undefined;
     }
 }
 
@@ -249,6 +262,26 @@ function patchMessageRetention() {
     }
 }
 
+function patchInternalPreloadLoadingRow() {
+    let createChannelStream: any;
+    try {
+        createChannelStream = findByName("createChannelStream", false);
+    } catch {}
+
+    if (!createChannelStream || typeof createChannelStream.default !== "function") {
+        log("createChannelStream was not available; internal preload loading-row patch skipped");
+        return;
+    }
+
+    safeRegisterPatch(() =>
+        instead("default", createChannelStream, (args, orig) => {
+            const rows = orig(...args);
+            const channelId = args?.[0]?.channel?.id;
+            return filterInternalPreloadRows(rows, channelId);
+        })
+    );
+}
+
 function patchHistoryFetches() {
     resolveModules();
     if (!MessageActions?.fetchMessages) {
@@ -281,6 +314,7 @@ export default {
         unloaded = false;
         resolveModules();
         patchMessageRetention();
+        patchInternalPreloadLoadingRow();
         patchHistoryFetches();
         schedulePreload(undefined, 750);
         log(`enabled; retaining and preloading up to ${TARGET_MESSAGES} messages per active channel`);
@@ -289,6 +323,7 @@ export default {
     onUnload() {
         unloaded = true;
         preloadGeneration++;
+        activePreload = undefined;
 
         if (preloadTimer) {
             clearTimeout(preloadTimer);
