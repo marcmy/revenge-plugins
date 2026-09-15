@@ -19,6 +19,7 @@ import {
     getInlineDeleteRecords,
     getMessageRecords,
     getRecordMessageTimestamp,
+    getRenderableDeleteRecords,
     hasVisibleContent,
     normalizeSettings,
     pruneRecords,
@@ -34,6 +35,7 @@ const unpatches: Array<() => void> = [];
 const messageCache = new RecentMessageCache();
 const handledDispatchEvents = new WeakSet<object>();
 const overlayMessages = new WeakSet<object>();
+const currentSessionDeleteRecordIds = new Set<string>();
 const FLUX_DISPATCH_METHODS = ["dispatch", "dirtyDispatch", "maybeDispatch"];
 const HISTORY_ACTION_LABELS = new Set(["View Edit History", "View Message History", "Clear Message History", "Hide Deleted Message"]);
 
@@ -92,6 +94,7 @@ function saveRecord(record: HistoryRecord) {
 
 function clearAllHistory() {
     storage.historyRecords = [];
+    currentSessionDeleteRecordIds.clear();
     messageCache.clear();
     overlayRefresh.request();
 }
@@ -180,7 +183,9 @@ function recordDelete(event: any) {
     if (!snapshot || !hasVisibleContent(snapshot)) return;
 
     const guildId = ChannelStore?.getChannel?.(snapshot.channelId)?.guild_id ?? snapshot.guildId ?? null;
-    saveRecord(createRecord("delete", { ...snapshot, guildId }));
+    const record = createRecord("delete", { ...snapshot, guildId });
+    currentSessionDeleteRecordIds.add(record.id);
+    saveRecord(record);
     overlayRefresh.request();
 }
 
@@ -294,8 +299,7 @@ function createOverlayRow(record: HistoryRecord, rows: any[], input: any): any |
 }
 
 function shouldRenderDeletedRows(): boolean {
-    const value = normalizeSettings(storage.settings);
-    return value.logDeletes && value.showDeletedInChannelsAfterRestart;
+    return normalizeSettings(storage.settings).logDeletes;
 }
 
 function patchDeletedMessageOverlay() {
@@ -319,7 +323,15 @@ function patchDeletedMessageOverlay() {
                 const channelId = input?.channel?.id ?? input?.messages?.channelId;
                 if (!channelId) return rows;
 
-                const records = getInlineDeleteRecords({ records: readRecords() }, channelId);
+                const settingsValue = normalizeSettings(storage.settings);
+                const records = getRenderableDeleteRecords(
+                    { records: readRecords() },
+                    channelId,
+                    {
+                        showSavedAfterRestart: settingsValue.showDeletedInChannelsAfterRestart,
+                        currentSessionRecordIds: currentSessionDeleteRecordIds,
+                    },
+                );
                 if (!records.length) return rows;
 
                 return mergeDeletedRows(
@@ -429,6 +441,7 @@ function patchActionSheet() {
 
 export default {
     onLoad() {
+        currentSessionDeleteRecordIds.clear();
         ensureStorage();
         resetOverlayRefresh();
         unbindRuntime?.();
@@ -453,6 +466,7 @@ export default {
         if (!normalizeSettings(storage.settings).persistHistory) {
             storage.historyRecords = [];
         }
+        currentSessionDeleteRecordIds.clear();
         messageCache.clear();
     },
     settings,

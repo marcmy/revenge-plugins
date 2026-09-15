@@ -4,6 +4,7 @@ import {
   dedupeDeleteRecordsByMessage,
   getInlineDeleteRecords,
   getKindRecords,
+  getRenderableDeleteRecords,
   normalizeHistoryRecord,
   setDeleteInlineHidden,
 } from "../.codex-tmp/MessageHistory/history.mjs";
@@ -44,6 +45,35 @@ if (normalizedLegacy.inlineHidden !== false) {
 let state = addRecord({ records: [] }, normalizedLegacy, settings, normalizedLegacy.timestamp);
 if (getInlineDeleteRecords(state, "channel-1").length !== 1) {
   throw new Error("Expected a visible saved delete to be an inline candidate");
+}
+
+const liveDelete = createRecord(
+  "delete",
+  {
+    ...base,
+    id: "live-deleted-message",
+    content: "deleted this session",
+    timestamp: "2026-09-14T20:06:00.000Z",
+  },
+  Date.parse("2026-09-14T20:07:00.000Z"),
+);
+const sessionState = { records: [normalizedLegacy, liveDelete] };
+const currentSessionRecordIds = new Set([liveDelete.id]);
+
+const liveOnly = getRenderableDeleteRecords(sessionState, "channel-1", {
+  showSavedAfterRestart: false,
+  currentSessionRecordIds,
+});
+if (liveOnly.length !== 1 || liveOnly[0].id !== liveDelete.id) {
+  throw new Error("Expected live deletes to render even when restart reinjection is disabled");
+}
+
+const includingSaved = getRenderableDeleteRecords(sessionState, "channel-1", {
+  showSavedAfterRestart: true,
+  currentSessionRecordIds,
+});
+if (includingSaved.length !== 2) {
+  throw new Error("Expected saved deletes to render when restart reinjection is enabled");
 }
 
 state = setDeleteInlineHidden(state, "channel-1", "deleted-message", true);
