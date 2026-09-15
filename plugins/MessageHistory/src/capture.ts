@@ -2,6 +2,41 @@ import type { MessageSnapshot } from "./types";
 
 export const MESSAGE_CACHE_LIMIT = 750;
 
+export const CAPTURE_SUBSCRIPTION_TYPES = [
+    "MESSAGE_CREATE",
+    "MESSAGE_UPDATE",
+    "MESSAGE_DELETE",
+    "MESSAGE_DELETE_BULK",
+    "LOAD_MESSAGES_SUCCESS",
+    "LOAD_MESSAGES_AROUND_SUCCESS",
+    "LOCAL_MESSAGES_LOADED",
+] as const;
+
+export interface DeleteEventTarget {
+    channelId: string;
+    messageId: string;
+}
+
+export function getDeleteEventTargets(event: any): DeleteEventTarget[] {
+    const channelId = event?.channelId ?? event?.channel_id;
+    if (!channelId) return [];
+
+    if (event?.type === "MESSAGE_DELETE_BULK") {
+        if (!Array.isArray(event?.ids)) return [];
+        return event.ids
+            .filter((id: unknown) => typeof id === "string" || typeof id === "number")
+            .map((id: string | number) => ({ channelId: String(channelId), messageId: String(id) }));
+    }
+
+    if (event?.type === "MESSAGE_DELETE") {
+        const messageId = event?.id ?? event?.messageId ?? event?.message_id ?? event?.message?.id;
+        if (messageId == null) return [];
+        return [{ channelId: String(channelId), messageId: String(messageId) }];
+    }
+
+    return [];
+}
+
 export function messageKey(channelId: string, messageId: string): string {
     return `${channelId}:${messageId}`;
 }
