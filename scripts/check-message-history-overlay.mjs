@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import {
   createRenderRefreshScheduler,
@@ -176,6 +176,34 @@ for (const token of ['findByName("createChannelStream"', "RecentMessageCache", "
   if (!indexSource.includes(token)) {
     throw new Error(`Expected redesigned runtime wiring to include: ${token}`);
   }
+}
+
+const historySource = readFileSync("plugins/MessageHistory/src/history.ts", "utf8");
+const settingsSource = readFileSync("plugins/MessageHistory/src/settings.tsx", "utf8");
+const typesSource = readFileSync("plugins/MessageHistory/src/types.ts", "utf8");
+const combinedProductionSource = `${indexSource}\n${historySource}\n${settingsSource}\n${typesSource}`;
+for (const token of [
+  "createSyntheticDeletedCreateEvent",
+  "message_history_synthetic_deleted",
+  "shouldConsumeSyntheticDeletedDismiss",
+  "debugReinject",
+  "reinjectDebugEvents",
+  "showReinjectDebugModal",
+  "recordReinjectDebugEvent",
+  "ReinjectDebugEvent",
+]) {
+  if (combinedProductionSource.includes(token)) {
+    throw new Error(`Expected obsolete reinjection/debug surface to be removed: ${token}`);
+  }
+}
+if (historySource.includes("flags: 64")) {
+  throw new Error("Expected deleted history to stop using Discord's EPHEMERAL flag");
+}
+if (existsSync("plugins/MessageHistory/src/debug.tsx")) {
+  throw new Error("Expected obsolete reinjection debug module to be deleted");
+}
+if (!indexSource.includes("bindMessageHistoryRuntime")) {
+  throw new Error("Expected settings/runtime invalidation to use the runtime bridge");
 }
 
 console.log("message history overlay ok");
