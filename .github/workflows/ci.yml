@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - "plugins/**"
+      - "scripts/**"
       - "build.mjs"
       - "package.json"
       - "package-lock.json"
@@ -45,6 +46,9 @@ jobs:
         # GitHub currently lists no patched image-size release for its DoS advisories;
         # Trivy still scans the full lockfile, while this gate protects shipped deps.
         run: npm audit --omit=dev --audit-level=high
+
+      - name: Check ShowHiddenChannels hook ordering
+        run: node scripts/check-show-hidden-channels-hook-order.mjs
 
       - name: Build plugins
         run: npm run build
