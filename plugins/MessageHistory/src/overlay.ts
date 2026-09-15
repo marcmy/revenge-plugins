@@ -4,8 +4,8 @@ import type { HistoryRecord } from "./types";
 export type MessageOrderKey = readonly [timestamp: number, messageId: string];
 
 export interface LoadedMessageWindow {
-    oldestKey: MessageOrderKey;
-    newestKey: MessageOrderKey;
+    oldestKey: MessageOrderKey | null;
+    newestKey: MessageOrderKey | null;
     hasMoreBefore: boolean;
     hasMoreAfter: boolean;
 }
@@ -38,7 +38,10 @@ export function getLoadedMessageWindow(
     hasMoreAfter: boolean,
 ): LoadedMessageWindow | null {
     const entries = getRealMessageEntries(rows);
-    if (!entries.length) return null;
+    if (!entries.length) {
+        if (hasMoreBefore || hasMoreAfter) return null;
+        return { oldestKey: null, newestKey: null, hasMoreBefore, hasMoreAfter };
+    }
 
     let oldestKey = entries[0].key;
     let newestKey = entries[0].key;
@@ -58,8 +61,8 @@ export function selectOverlayDeleteRecords(
         .filter((record) => record.inlineHidden !== true)
         .filter((record) => {
             const key = getRecordOrderKey(record);
-            if (compareOrderKeys(key, window.oldestKey) < 0 && window.hasMoreBefore) return false;
-            if (compareOrderKeys(key, window.newestKey) > 0 && window.hasMoreAfter) return false;
+            if (window.oldestKey && compareOrderKeys(key, window.oldestKey) < 0 && window.hasMoreBefore) return false;
+            if (window.newestKey && compareOrderKeys(key, window.newestKey) > 0 && window.hasMoreAfter) return false;
             return true;
         });
 }
@@ -70,11 +73,24 @@ export function mergeDeletedRows(
     makeRow: (record: HistoryRecord) => any,
     options: { hasMoreBefore: boolean; hasMoreAfter: boolean },
 ): any[] {
-    if (!Array.isArray(rows) || !rows.length || !records.length) return Array.isArray(rows) ? [...rows] : rows;
+    if (!Array.isArray(rows)) return rows;
+    if (!records.length) return [...rows];
 
     const realEntries = getRealMessageEntries(rows);
     const window = getLoadedMessageWindow(rows, options.hasMoreBefore, options.hasMoreAfter);
-    if (!realEntries.length || !window) return [...rows];
+    if (!window) return [...rows];
+
+    if (!realEntries.length) {
+        const candidates = selectOverlayDeleteRecords(records, window).sort((a, b) =>
+            compareOrderKeys(getRecordOrderKey(a), getRecordOrderKey(b)),
+        );
+        if (!candidates.length) return [...rows];
+
+        const overlayRows = candidates
+            .map((record) => safeMakeRow(record, makeRow))
+            .filter((row): row is any => row != null);
+        return [...rows, ...overlayRows];
+    }
 
     const existingIds = new Set(realEntries.map((entry) => String(entry.message.id)));
     const ascending = compareOrderKeys(realEntries[0].key, realEntries[realEntries.length - 1].key) <= 0;
