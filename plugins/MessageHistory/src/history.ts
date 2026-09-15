@@ -5,6 +5,7 @@ export const DEFAULT_SETTINGS: MessageHistorySettings = {
     logDeletes: true,
     persistHistory: false,
     showDeletedInChannelsAfterRestart: false,
+    debugReinject: false,
     maxTotalRecords: 200,
     maxRecordsPerChannel: 50,
     maxRecordsPerMessage: 10,
@@ -19,17 +20,11 @@ export function normalizeSettings(input?: Partial<MessageHistorySettings>): Mess
         logDeletes: settings.logDeletes !== false,
         persistHistory: settings.persistHistory === true,
         showDeletedInChannelsAfterRestart: settings.showDeletedInChannelsAfterRestart === true,
+        debugReinject: settings.debugReinject === true,
         maxTotalRecords: clampPositiveInteger(settings.maxTotalRecords, DEFAULT_SETTINGS.maxTotalRecords),
         maxRecordsPerChannel: clampPositiveInteger(settings.maxRecordsPerChannel, DEFAULT_SETTINGS.maxRecordsPerChannel),
         maxRecordsPerMessage: clampPositiveInteger(settings.maxRecordsPerMessage, DEFAULT_SETTINGS.maxRecordsPerMessage),
         maxAgeDays: clampPositiveInteger(settings.maxAgeDays, DEFAULT_SETTINGS.maxAgeDays),
-    };
-}
-
-export function normalizeHistoryRecord(record: HistoryRecord): HistoryRecord {
-    return {
-        ...record,
-        inlineHidden: record.kind === "delete" ? record.inlineHidden === true : false,
     };
 }
 
@@ -49,7 +44,6 @@ export function createRecord(kind: HistoryRecord["kind"], snapshot: MessageSnaps
         embeds: Array.isArray(snapshot.embeds) ? snapshot.embeds : [],
         timestamp: now,
         messageTimestamp,
-        inlineHidden: false,
     };
 }
 
@@ -71,9 +65,7 @@ export function pruneRecords(
 ): HistoryRecord[] {
     const settings = normalizeSettings(settingsInput);
     const minTimestamp = now - settings.maxAgeDays * 24 * 60 * 60 * 1000;
-    let next = sortNewestFirst(records.map(normalizeHistoryRecord)).filter(
-        (record) => Number(record.timestamp) >= minTimestamp,
-    );
+    let next = sortNewestFirst(records).filter((record) => Number(record.timestamp) >= minTimestamp);
 
     const byMessage = new Map<string, number>();
     next = next.filter((record) => {
@@ -101,50 +93,38 @@ export function getMessageRecords(state: HistoryState, channelId: string, messag
     );
 }
 
-export function dedupeDeleteRecordsByMessage(records: HistoryRecord[]): HistoryRecord[] {
-    const newest = new Map<string, HistoryRecord>();
+export function createSyntheticDeletedMessage(record: HistoryRecord): any {
+    const timestamp = new Date(getRecordMessageTimestamp(record)).toISOString();
 
-    for (const record of sortNewestFirst(records.filter((record) => record.kind === "delete"))) {
-        const key = messageKey(record.channelId, record.messageId);
-        if (!newest.has(key)) newest.set(key, normalizeHistoryRecord(record));
-    }
-
-    return [...newest.values()];
-}
-
-export function getInlineDeleteRecords(state: HistoryState, channelId: string): HistoryRecord[] {
-    return sortOldestByMessageTime(
-        dedupeDeleteRecordsByMessage(state.records ?? []).filter(
-            (record) => record.channelId === channelId && record.inlineHidden !== true,
-        ),
-    );
-}
-
-export function getRenderableDeleteRecords(
-    state: HistoryState,
-    channelId: string,
-    options: {
-        showSavedAfterRestart: boolean;
-        currentSessionRecordIds: ReadonlySet<string>;
-    },
-): HistoryRecord[] {
-    const records = getInlineDeleteRecords(state, channelId);
-    if (options.showSavedAfterRestart) return records;
-    return records.filter((record) => options.currentSessionRecordIds.has(record.id));
-}
-
-export function setDeleteInlineHidden(
-    state: HistoryState,
-    channelId: string,
-    messageId: string,
-    hidden: boolean,
-): HistoryState {
     return {
-        records: (state.records ?? []).map((record) =>
-            record.kind === "delete" && record.channelId === channelId && record.messageId === messageId
-                ? { ...normalizeHistoryRecord(record), inlineHidden: hidden }
-                : record,
-        ),
+        id: record.messageId,
+        channel_id: record.channelId,
+        guild_id: record.guildId ?? null,
+        content: formatDeletedContent(record.content),
+        attachments: Array.isArray(record.attachments) ? record.attachments : [],
+        embeds: Array.isArray(record.embeds) ? record.embeds : [],
+        flags: 64,
+        type: 0,
+        timestamp,
+        edited_timestamp: null,
+        author: {
+            id: record.authorId ?? "0",
+            username: record.authorUsername ?? "Unknown User",
+        },
+        message_reference: null,
+        message_history_synthetic_deleted: true,
+    };
+}
+
+export function createSyntheticDeletedCreateEvent(record: HistoryRecord): any {
+    return {
+        type: "MESSAGE_CREATE",
+        channelId: record.channelId,
+        message: createSyntheticDeletedMessage(record),
+        optimistic: false,
+        sendMessageOptions: {},
+        isPushNotification: false,
+        otherPluginBypass: true,
     };
 }
 
@@ -155,6 +135,23 @@ export function getEventMessageIdentity(event: any): { channelId?: string; messa
         channelId: event?.channelId ?? event?.channel_id ?? message?.channel_id ?? message?.channelId,
         messageId: event?.id ?? event?.messageId ?? event?.message_id ?? message?.id,
     };
+}
+
+export function isSyntheticDeletedMessage(message: any): boolean {
+    if (!message) return false;
+    if (message.message_history_synthetic_deleted === true) return true;
+
+    const flags = Number(message.flags ?? 0);
+    const content = typeof message.content === "string" ? message.content : "";
+    return (flags & 64) === 64 && content.startsWith("[deleted]");
+}
+
+export function shouldConsumeSyntheticDeletedDismiss(input: {
+    hasSavedDeleteRecord: boolean;
+    trackedSyntheticMessage: boolean;
+    protectedRecentDelete?: boolean;
+}): boolean {
+    return input.hasSavedDeleteRecord && input.trackedSyntheticMessage && input.protectedRecentDelete !== true;
 }
 
 export function getKindRecords(state: HistoryState, kind: HistoryRecord["kind"]): HistoryRecord[] {
@@ -202,7 +199,7 @@ export function getRecordMessageTimestamp(record: HistoryRecord): number {
 export function sortOldestByMessageTime(records: HistoryRecord[]): HistoryRecord[] {
     return [...records].sort((a, b) => {
         const timeDelta = getRecordMessageTimestamp(a) - getRecordMessageTimestamp(b);
-        return timeDelta || a.messageId.localeCompare(b.messageId) || a.timestamp - b.timestamp;
+        return timeDelta || a.timestamp - b.timestamp;
     });
 }
 
@@ -219,6 +216,11 @@ function sortNewestFirst(records: HistoryRecord[]): HistoryRecord[] {
     return [...records].sort((a, b) => b.timestamp - a.timestamp);
 }
 
+function formatDeletedContent(content: string): string {
+    if (!content) return "[deleted]";
+    return content.startsWith("[deleted]") ? content : `[deleted] ${content}`;
+}
+
 function parseMessageTimestamp(value: MessageSnapshot["timestamp"]): number | undefined {
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value !== "string") return undefined;
@@ -233,10 +235,9 @@ function parseMessageTimestamp(value: MessageSnapshot["timestamp"]): number | un
 function timestampFromSnowflake(id: string): number | undefined {
     if (!/^\d+$/.test(id)) return undefined;
 
-    try {
-        const timestamp = Number((BigInt(id) >> 22n) + 1_420_070_400_000n);
-        return Number.isFinite(timestamp) && timestamp > 1_420_070_400_000 ? timestamp : undefined;
-    } catch {
-        return undefined;
-    }
+    const snowflake = Number(id);
+    if (!Number.isFinite(snowflake) || snowflake <= 0) return undefined;
+
+    const timestamp = Math.floor(snowflake / 4_194_304) + 1_420_070_400_000;
+    return Number.isFinite(timestamp) && timestamp > 1_420_070_400_000 ? timestamp : undefined;
 }
