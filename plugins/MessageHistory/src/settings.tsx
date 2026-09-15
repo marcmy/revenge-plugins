@@ -4,8 +4,8 @@ import { showConfirmationAlert } from "@vendetta/ui/alerts";
 import { ErrorBoundary, Forms } from "@vendetta/ui/components";
 import { getAssetIDByName } from "@vendetta/ui/assets";
 
-import { clearReinjectDebugEvents, readReinjectDebugEvents, showReinjectDebugModal } from "./debug";
 import { getKindRecords, normalizeSettings } from "./history";
+import { clearAllHistoryRuntime, requestMessageHistoryOverlayRefresh } from "./runtime";
 import { selectNumericSetting, SETTING_OPTIONS, type NumericSetting } from "./settingsOptions";
 import type { HistoryRecord, MessageHistorySettings } from "./types";
 import { showHistoryModal } from "./ui";
@@ -16,10 +16,6 @@ function readSettings(): MessageHistorySettings {
 
 function readRecordCount(): number {
     return Array.isArray(storage.historyRecords) ? storage.historyRecords.length : 0;
-}
-
-function readDebugEventCount(): number {
-    return readReinjectDebugEvents().length;
 }
 
 function readRecords(): HistoryRecord[] {
@@ -37,20 +33,7 @@ function clearHistory(onCleared: () => void) {
         confirmText: "Clear",
         cancelText: "Cancel",
         onConfirm: () => {
-            storage.historyRecords = [];
-            onCleared();
-        },
-    });
-}
-
-function clearReinjectDebugLog(onCleared: () => void) {
-    showConfirmationAlert({
-        title: "Clear Reinject Debug Log",
-        content: "Remove all saved reinjection debug events?",
-        confirmText: "Clear",
-        cancelText: "Cancel",
-        onConfirm: () => {
-            clearReinjectDebugEvents();
+            clearAllHistoryRuntime();
             onCleared();
         },
     });
@@ -107,14 +90,16 @@ function OptionPickerContent({
 export default function Settings() {
     const [settings, setSettings] = React.useState(readSettings);
     const [recordCount, setRecordCount] = React.useState(readRecordCount);
-    const [debugEventCount, setDebugEventCount] = React.useState(readDebugEventCount);
 
     const updateSettings = React.useCallback((patch: Partial<MessageHistorySettings>) => {
         const nextSettings = normalizeSettings({ ...settings, ...patch });
         persistSettings(nextSettings);
         setSettings(nextSettings);
         setRecordCount(readRecordCount());
-        setDebugEventCount(readDebugEventCount());
+
+        if ("logDeletes" in patch || "showDeletedInChannelsAfterRestart" in patch) {
+            requestMessageHistoryOverlayRefresh();
+        }
     }, [settings]);
 
     const selectNumber = React.useCallback((key: NumericSetting, value: number) => {
@@ -122,7 +107,6 @@ export default function Settings() {
         persistSettings(nextSettings);
         setSettings(nextSettings);
         setRecordCount(readRecordCount());
-        setDebugEventCount(readDebugEventCount());
     }, [settings]);
 
     const showOptionPicker = React.useCallback((key: NumericSetting) => {
@@ -150,7 +134,7 @@ export default function Settings() {
                 />
                 <Forms.FormSwitchRow
                     label="Log deletes"
-                    subLabel="Keep deleted messages visible locally"
+                    subLabel="Save deleted messages locally"
                     value={settings.logDeletes}
                     onValueChange={(value) => updateSettings({ logDeletes: value })}
                 />
@@ -162,15 +146,9 @@ export default function Settings() {
                 />
                 <Forms.FormSwitchRow
                     label="Show saved deletes in channels"
-                    subLabel="After restart, softly restore saved deleted messages in loaded channels"
+                    subLabel="Render saved deleted messages inline when their original position is loaded"
                     value={settings.showDeletedInChannelsAfterRestart}
                     onValueChange={(value) => updateSettings({ showDeletedInChannelsAfterRestart: value })}
-                />
-                <Forms.FormSwitchRow
-                    label="Debug reinjection"
-                    subLabel="Record message-load event shapes for troubleshooting restart reinjection"
-                    value={settings.debugReinject}
-                    onValueChange={(value) => updateSettings({ debugReinject: value })}
                 />
                 <Forms.FormRow
                     label="Max total records"
@@ -207,20 +185,6 @@ export default function Settings() {
                     subLabel={`${deletedRecords.length} saved deleted messages`}
                     trailing={arrow()}
                     onPress={() => showHistoryModal(deletedRecords, "Deleted Messages")}
-                />
-                <Forms.FormRow
-                    label="Browse reinject debug log"
-                    subLabel={`${debugEventCount} captured events`}
-                    trailing={arrow()}
-                    onPress={() => {
-                        setDebugEventCount(readDebugEventCount());
-                        showReinjectDebugModal();
-                    }}
-                />
-                <Forms.FormRow
-                    label="Clear reinject debug log"
-                    subLabel={`${debugEventCount} captured events`}
-                    onPress={() => clearReinjectDebugLog(() => setDebugEventCount(0))}
                 />
                 <Forms.FormRow
                     label="Clear all history"
