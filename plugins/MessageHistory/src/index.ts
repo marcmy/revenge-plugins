@@ -25,6 +25,7 @@ import {
     setDeleteInlineHidden,
 } from "./history";
 import { createRenderRefreshScheduler, mergeDeletedRows } from "./overlay";
+import { bindMessageHistoryRuntime } from "./runtime";
 import settings from "./settings";
 import type { HistoryRecord, MessageSnapshot } from "./types";
 import { createActionSheetRow, showHistoryModal } from "./ui";
@@ -43,6 +44,8 @@ const MessageStore = findByProps("getMessage", "getMessages");
 const MessageRecordUtils = findByProps("createMessageRecord", "updateMessageRecord");
 const RowGeneratorConstants = findByProps("RowType", "LoadingType", "SeparatorType", "Changeset");
 
+let unbindRuntime: (() => void) | undefined;
+
 const overlayRefresh = createRenderRefreshScheduler(() => {
     try {
         MessageStore?.emitChange?.();
@@ -58,10 +61,6 @@ function ensureStorage() {
 
     if (!nextSettings.persistHistory) {
         storage.historyRecords = [];
-    }
-
-    if (!Array.isArray(storage.reinjectDebugEvents)) {
-        storage.reinjectDebugEvents = [];
     }
 }
 
@@ -80,6 +79,12 @@ function saveRecord(record: HistoryRecord) {
     const nextSettings = normalizeSettings(storage.settings);
     storage.settings = nextSettings;
     storage.historyRecords = addRecord({ records: readRecords() }, record, nextSettings).records;
+}
+
+function clearAllHistory() {
+    storage.historyRecords = [];
+    messageCache.clear();
+    overlayRefresh.request();
 }
 
 function safePushUnpatch(register: () => (() => void) | void) {
@@ -414,15 +419,14 @@ function patchActionSheet() {
     );
 }
 
-export function clearAllHistoryRuntime() {
-    storage.historyRecords = [];
-    messageCache.clear();
-    overlayRefresh.request();
-}
-
 export default {
     onLoad() {
         ensureStorage();
+        unbindRuntime?.();
+        unbindRuntime = bindMessageHistoryRuntime({
+            clearAllHistory,
+            requestOverlayRefresh: () => overlayRefresh.request(),
+        });
         patchFluxDispatcher();
         patchDeletedMessageOverlay();
         patchActionSheet();
@@ -434,6 +438,8 @@ export default {
             } catch {}
         }
 
+        unbindRuntime?.();
+        unbindRuntime = undefined;
         overlayRefresh.dispose();
         if (!normalizeSettings(storage.settings).persistHistory) {
             storage.historyRecords = [];
