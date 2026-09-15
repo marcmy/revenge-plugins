@@ -513,11 +513,15 @@ function reidentifyGatewayWithoutChannelObfuscation() {
 
             // A new IDENTIFY is required for Discord to renegotiate the gateway
             // capability that controls whether private channel metadata is
-            // obfuscated. A RESUME keeps the old capability set.
+            // obfuscated. A RESUME keeps the old capability set. Preserve the
+            // auth token while closing, then invalidate only the session so the
+            // reconnect takes Discord's IDENTIFY path without emitting a user
+            // disconnect/reset during startup.
             if (socket.isClosed?.()) return;
 
             forceFullGuildSyncOnNextIdentify = true;
-            socket.close();
+            socket.close(true);
+            socket.sessionId = null;
             setTimeout(() => {
                 try {
                     const currentSocket = GatewayConnectionStore?.getSocket?.() ?? socket;
