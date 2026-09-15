@@ -435,21 +435,36 @@ function patchChannelIcons() {
 function patchPrivateChannelHidingExperiment() {
     if (!PrivateChannelHidingExperiment) {
         log("private-channel-hiding experiment module was not available");
-    } else {
-        for (const method of [
-            "getCachedPrivateChannelObfuscation",
-            "isChannelMetadataObfuscationEnabled",
-            "useIsChannelMetadataObfuscationEnabled",
-            "isChannelMetadataIntegrityCheckEnabled",
-        ]) {
-            if (typeof PrivateChannelHidingExperiment[method] !== "function") continue;
-
-            safeRegisterPatch(() =>
-                instead(method, PrivateChannelHidingExperiment, () => false)
-            );
-        }
+        return;
     }
 
+    for (const method of [
+        "getCachedPrivateChannelObfuscation",
+        "isChannelMetadataObfuscationEnabled",
+        "isChannelMetadataIntegrityCheckEnabled",
+    ]) {
+        if (typeof PrivateChannelHidingExperiment[method] !== "function") continue;
+
+        safeRegisterPatch(() =>
+            instead(method, PrivateChannelHidingExperiment, () => false)
+        );
+    }
+
+    if (typeof PrivateChannelHidingExperiment.useIsChannelMetadataObfuscationEnabled === "function") {
+        safeRegisterPatch(() =>
+            instead(
+                "useIsChannelMetadataObfuscationEnabled",
+                PrivateChannelHidingExperiment,
+                (args, orig) => {
+                    // This export is a real React custom hook. Always call the
+                    // original so Discord consumes the same hooks every render,
+                    // then override only the resulting experiment value.
+                    orig(...args);
+                    return false;
+                },
+            )
+        );
+    }
 }
 
 function patchGatewayIdentifyPayload() {
