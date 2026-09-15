@@ -5,7 +5,6 @@ export const DEFAULT_SETTINGS: MessageHistorySettings = {
     logDeletes: true,
     persistHistory: false,
     showDeletedInChannelsAfterRestart: false,
-    debugReinject: false,
     maxTotalRecords: 200,
     maxRecordsPerChannel: 50,
     maxRecordsPerMessage: 10,
@@ -20,7 +19,6 @@ export function normalizeSettings(input?: Partial<MessageHistorySettings>): Mess
         logDeletes: settings.logDeletes !== false,
         persistHistory: settings.persistHistory === true,
         showDeletedInChannelsAfterRestart: settings.showDeletedInChannelsAfterRestart === true,
-        debugReinject: settings.debugReinject === true,
         maxTotalRecords: clampPositiveInteger(settings.maxTotalRecords, DEFAULT_SETTINGS.maxTotalRecords),
         maxRecordsPerChannel: clampPositiveInteger(settings.maxRecordsPerChannel, DEFAULT_SETTINGS.maxRecordsPerChannel),
         maxRecordsPerMessage: clampPositiveInteger(settings.maxRecordsPerMessage, DEFAULT_SETTINGS.maxRecordsPerMessage),
@@ -137,41 +135,6 @@ export function setDeleteInlineHidden(
     };
 }
 
-export function createSyntheticDeletedMessage(record: HistoryRecord): any {
-    const timestamp = new Date(getRecordMessageTimestamp(record)).toISOString();
-
-    return {
-        id: record.messageId,
-        channel_id: record.channelId,
-        guild_id: record.guildId ?? null,
-        content: formatDeletedContent(record.content),
-        attachments: Array.isArray(record.attachments) ? record.attachments : [],
-        embeds: Array.isArray(record.embeds) ? record.embeds : [],
-        flags: 64,
-        type: 0,
-        timestamp,
-        edited_timestamp: null,
-        author: {
-            id: record.authorId ?? "0",
-            username: record.authorUsername ?? "Unknown User",
-        },
-        message_reference: null,
-        message_history_synthetic_deleted: true,
-    };
-}
-
-export function createSyntheticDeletedCreateEvent(record: HistoryRecord): any {
-    return {
-        type: "MESSAGE_CREATE",
-        channelId: record.channelId,
-        message: createSyntheticDeletedMessage(record),
-        optimistic: false,
-        sendMessageOptions: {},
-        isPushNotification: false,
-        otherPluginBypass: true,
-    };
-}
-
 export function getEventMessageIdentity(event: any): { channelId?: string; messageId?: string } {
     const message = event?.message;
 
@@ -179,23 +142,6 @@ export function getEventMessageIdentity(event: any): { channelId?: string; messa
         channelId: event?.channelId ?? event?.channel_id ?? message?.channel_id ?? message?.channelId,
         messageId: event?.id ?? event?.messageId ?? event?.message_id ?? message?.id,
     };
-}
-
-export function isSyntheticDeletedMessage(message: any): boolean {
-    if (!message) return false;
-    if (message.message_history_synthetic_deleted === true) return true;
-
-    const flags = Number(message.flags ?? 0);
-    const content = typeof message.content === "string" ? message.content : "";
-    return (flags & 64) === 64 && content.startsWith("[deleted]");
-}
-
-export function shouldConsumeSyntheticDeletedDismiss(input: {
-    hasSavedDeleteRecord: boolean;
-    trackedSyntheticMessage: boolean;
-    protectedRecentDelete?: boolean;
-}): boolean {
-    return input.hasSavedDeleteRecord && input.trackedSyntheticMessage && input.protectedRecentDelete !== true;
 }
 
 export function getKindRecords(state: HistoryState, kind: HistoryRecord["kind"]): HistoryRecord[] {
@@ -260,11 +206,6 @@ function sortNewestFirst(records: HistoryRecord[]): HistoryRecord[] {
     return [...records].sort((a, b) => b.timestamp - a.timestamp);
 }
 
-function formatDeletedContent(content: string): string {
-    if (!content) return "[deleted]";
-    return content.startsWith("[deleted]") ? content : `[deleted] ${content}`;
-}
-
 function parseMessageTimestamp(value: MessageSnapshot["timestamp"]): number | undefined {
     if (typeof value === "number" && Number.isFinite(value)) return value;
     if (typeof value !== "string") return undefined;
@@ -279,9 +220,10 @@ function parseMessageTimestamp(value: MessageSnapshot["timestamp"]): number | un
 function timestampFromSnowflake(id: string): number | undefined {
     if (!/^\d+$/.test(id)) return undefined;
 
-    const snowflake = Number(id);
-    if (!Number.isFinite(snowflake) || snowflake <= 0) return undefined;
-
-    const timestamp = Math.floor(snowflake / 4_194_304) + 1_420_070_400_000;
-    return Number.isFinite(timestamp) && timestamp > 1_420_070_400_000 ? timestamp : undefined;
+    try {
+        const timestamp = Number((BigInt(id) >> 22n) + 1_420_070_400_000n);
+        return Number.isFinite(timestamp) && timestamp > 1_420_070_400_000 ? timestamp : undefined;
+    } catch {
+        return undefined;
+    }
 }
