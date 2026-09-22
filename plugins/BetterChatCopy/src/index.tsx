@@ -310,7 +310,7 @@ function CopyWindow({ message, onTextChange }: { message: any; onTextChange: (te
         setLoading(true);
         try {
             const channelId = message.channel_id ?? message.channelId;
-            const messages = await fetchConversation(channelId, message, direction, clampMessageCount(count));
+            const messages = await fetchConversation(channelId, message, direction, clampCount(count));
             updateText(formatConversation(messages, channelId));
         } catch (error) {
             console.error("[BetterChatCopy] fetch failed", error);
