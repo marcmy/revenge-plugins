@@ -1,0 +1,14 @@
+{
+  "name": "BetterChatCopy",
+  "description": "Copy clean nearby Discord conversations from the mobile message action sheet.",
+  "authors": [
+    {
+      "name": "marcmy",
+      "id": "92076581404545024"
+    }
+  ],
+  "main": "src/index.tsx",
+  "vendetta": {
+    "icon": "ic_copy_24px"
+  }
+}
