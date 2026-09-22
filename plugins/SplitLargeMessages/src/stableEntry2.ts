@@ -1,25 +1,29 @@
 import { findAll, findByProps, findByStoreName } from "@vendetta/metro";
+import { FluxDispatcher, ReactNative } from "@vendetta/metro/common";
 import { instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 import { getAssetIDByName } from "@vendetta/ui/assets";
 import { showToast } from "@vendetta/ui/toasts";
 
-import { splitMarkdownMessage } from "./markdownSplitter";
+import { splitMarkdownMessageDetailed, type MarkdownSplitResult } from "./markdownSplitter";
 import settings from "./settings";
 
 const MESSAGE_LIMIT = 2000;
 const NITRO_MESSAGE_LIMIT = 4000;
 const MIN_SEND_DELAY_MS = 1000;
+const PATCH_SWEEP_INTERVAL_MS = 5000;
 
 let unpatchSend: (() => void) | undefined;
 let unpatchUpload: (() => void) | undefined;
+let patchSweepInterval: ReturnType<typeof setInterval> | undefined;
+let unloaded = false;
 
 const runtimeUnpatches: Array<() => void> = [];
-const retryTimers: Array<ReturnType<typeof setTimeout>> = [];
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
-const patchedComposerTargets = new Set<object>();
 const patchedDialogTargets = new Set<object>();
-const activeSplitChannels = new Set<string>();
+const patchedGuardTargets = new Set<object>();
+const channelQueues = new Map<string, Promise<void>>();
+const autoTextStates = new WeakMap<object, "processing" | "failed" | "done">();
 
 type MessageLocation = {
     index: number;
@@ -55,6 +59,7 @@ function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>
 
     const hasAnyMethod = (value: any) => {
         if (!value || typeof value !== "object") return false;
+
         try {
             return methods.some((method) => typeof value[method] === "function");
         } catch {
@@ -69,7 +74,11 @@ function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>
             if (hasAnyMethod(value)) targets.add(value as Record<string, any>);
 
             const proto = Object.getPrototypeOf(value);
-            if (proto && proto !== Object.prototype && hasAnyMethod(proto)) {
+            if (
+                proto &&
+                proto !== Object.prototype &&
+                hasAnyMethod(proto)
+            ) {
                 targets.add(proto as Record<string, any>);
             }
         } catch {}
@@ -97,32 +106,64 @@ function getMessageLocation(args: any[]): MessageLocation {
     const first = args[0];
     const second = args[1];
 
-    if (second && typeof second === "object") return { index: 1, message: second };
-    if (first && typeof first === "object") return { index: 0, message: first };
+    if (second && typeof second === "object") {
+        return { index: 1, message: second };
+    }
+
+    if (first && typeof first === "object") {
+        return { index: 0, message: first };
+    }
+
     return { index: 1, message: {} };
 }
 
-function extractContent(value: any, depth = 0): string {
+function extractContent(value: any, depth = 0, seen = new Set<any>()): string {
     if (value == null || depth > 5) return "";
     if (typeof value === "string") return value;
+    if (typeof value !== "object") return "";
+    if (seen.has(value)) return "";
+
+    seen.add(value);
+
     if (Array.isArray(value)) {
         let longest = "";
+
         for (const item of value) {
-            const candidate = extractContent(item, depth + 1);
+            const candidate = extractContent(item, depth + 1, seen);
             if (candidate.length > longest.length) longest = candidate;
         }
+
         return longest;
     }
-    if (typeof value !== "object") return "";
 
-    for (const key of ["content", "text", "value", "rawContent", "messageContent", "pendingContent"]) {
+    for (const key of [
+        "content",
+        "text",
+        "value",
+        "rawContent",
+        "messageContent",
+        "pendingContent",
+    ]) {
         const candidate = value[key];
-        if (typeof candidate === "string" && candidate.length > 0) return candidate;
+        if (typeof candidate === "string" && candidate.length > 0) {
+            return candidate;
+        }
     }
 
     let longest = "";
-    for (const key of ["message", "draft", "state", "editor", "input", "composerState", "formState", "richValue"]) {
-        const candidate = extractContent(value[key], depth + 1);
+
+    for (const key of [
+        "message",
+        "draft",
+        "state",
+        "editor",
+        "input",
+        "composerState",
+        "formState",
+        "richValue",
+        "sendMessageOptions",
+    ]) {
+        const candidate = extractContent(value[key], depth + 1, seen);
         if (candidate.length > longest.length) longest = candidate;
     }
 
@@ -131,27 +172,74 @@ function extractContent(value: any, depth = 0): string {
 
 function getLongestContent(values: any[]): string {
     let longest = "";
+
     for (const value of values) {
         const content = extractContent(value);
         if (content.length > longest.length) longest = content;
     }
+
     return longest;
 }
 
-function resolveChannelId(SelectedChannelStore: any, ...values: any[]): string | undefined {
+function isSnowflakeLike(value: unknown): value is string {
+    return typeof value === "string" && /^\d{10,25}$/.test(value);
+}
+
+function getChannelIdFromObject(value: any): string | undefined {
+    if (!value || typeof value !== "object") return undefined;
+
+    const direct = value.channelId ?? value.channel_id;
+    if (isSnowflakeLike(direct)) return direct;
+
+    const nested = value.channel?.id;
+    if (isSnowflakeLike(nested)) return nested;
+
+    const rootId = value.id;
+    const looksLikeMessage =
+        "content" in value ||
+        "author" in value ||
+        "message_reference" in value ||
+        "messageReference" in value;
+    const looksLikeChannel =
+        !looksLikeMessage &&
+        isSnowflakeLike(rootId) &&
+        (
+            typeof value.type === "number" ||
+            "recipients" in value ||
+            "parent_id" in value ||
+            "parentId" in value ||
+            typeof value.isPrivate === "function" ||
+            typeof value.isGuildVocal === "function"
+        );
+
+    return looksLikeChannel ? rootId : undefined;
+}
+
+function resolveChannelIdFromObjects(
+    SelectedChannelStore: any,
+    ...values: any[]
+): string | undefined {
     for (const value of values) {
-        if (!value) continue;
-        if (typeof value === "string") return value;
-        if (typeof value !== "object") continue;
-
-        const direct = value.channelId ?? value.channel_id ?? value.id;
-        if (typeof direct === "string" && direct.length > 0) return direct;
-
-        const nested = value.channel?.id;
-        if (typeof nested === "string" && nested.length > 0) return nested;
+        const channelId = getChannelIdFromObject(value);
+        if (channelId) return channelId;
     }
 
-    return SelectedChannelStore?.getChannelId?.();
+    const selected = SelectedChannelStore?.getChannelId?.();
+    return isSnowflakeLike(selected) ? selected : undefined;
+}
+
+function resolveSendChannelId(
+    SelectedChannelStore: any,
+    args: any[],
+): string | undefined {
+    if (isSnowflakeLike(args[0])) return args[0];
+
+    return resolveChannelIdFromObjects(
+        SelectedChannelStore,
+        args[0],
+        args[1],
+        ...args,
+    );
 }
 
 function getDraftText(channelId: string, DraftStore: any): string {
@@ -168,6 +256,89 @@ function getDraftText(channelId: string, DraftStore: any): string {
     } catch {}
 
     return "";
+}
+
+function saveDraftText(
+    channelId: string,
+    text: string,
+    DraftStore: any,
+    DraftManager: any,
+): boolean {
+    if (!text || !DraftManager?.saveDraft) return false;
+
+    const attempts = [
+        () => DraftManager.saveDraft(channelId, 0, text),
+        () => DraftManager.saveDraft(channelId, text, 0),
+        () => DraftManager.saveDraft(channelId, text),
+    ];
+
+    for (const attempt of attempts) {
+        try {
+            attempt();
+            if (getDraftText(channelId, DraftStore) === text) return true;
+        } catch {}
+    }
+
+    return false;
+}
+
+function copyText(text: string): boolean {
+    if (!text) return false;
+
+    const Clipboard =
+        findByProps("setString", "getString") ??
+        (ReactNative as any).Clipboard;
+
+    try {
+        Clipboard?.setString?.(text);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function restoreUnsentContent(
+    channelId: string,
+    text: string,
+    DraftStore: any,
+    DraftManager: any,
+) {
+    if (!text) return;
+
+    const currentDraft = getDraftText(channelId, DraftStore);
+
+    if (!currentDraft || currentDraft === text) {
+        if (saveDraftText(channelId, text, DraftStore, DraftManager)) {
+            showFailure("Unsent message parts restored to the draft");
+            return;
+        }
+    }
+
+    if (copyText(text)) {
+        showFailure("Unsent message parts copied to clipboard");
+        return;
+    }
+
+    showFailure("Some message parts could not be sent");
+}
+
+function clearDraftAndUploads(
+    channelId: string,
+    DraftManager: any,
+    UploadManager: any,
+) {
+    for (const args of [
+        [channelId, 0],
+        [channelId],
+    ]) {
+        try {
+            DraftManager?.clearDraft?.(...args);
+        } catch {}
+
+        try {
+            UploadManager?.clearAll?.(...args);
+        } catch {}
+    }
 }
 
 function buildChunkArgs(
@@ -188,7 +359,7 @@ function buildChunkArgs(
               validNonShortcutEmojis: message.validNonShortcutEmojis ?? [],
           };
 
-    if (typeof nextArgs[0] === "string") {
+    if (isSnowflakeLike(nextArgs[0])) {
         nextArgs[0] = channelId;
         nextArgs[1] = chunkMessage;
         return nextArgs;
@@ -206,26 +377,109 @@ function buildChunkArgs(
     return nextArgs;
 }
 
+function findMessagePayload(
+    value: any,
+    depth = 0,
+    seen = new Set<any>(),
+): Record<string, any> | undefined {
+    if (!value || typeof value !== "object" || depth > 5) return undefined;
+    if (seen.has(value)) return undefined;
+
+    seen.add(value);
+
+    if (!Array.isArray(value)) {
+        const content = value.content;
+        const looksLikePayload =
+            typeof content === "string" &&
+            (
+                "tts" in value ||
+                "invalidEmojis" in value ||
+                "validNonShortcutEmojis" in value ||
+                "message_reference" in value ||
+                "messageReference" in value ||
+                "allowed_mentions" in value ||
+                "allowedMentions" in value ||
+                "sticker_ids" in value ||
+                "stickerIds" in value
+            );
+
+        if (looksLikePayload) return value;
+    }
+
+    for (const nested of safeObjectValues(value)) {
+        const payload = findMessagePayload(nested, depth + 1, seen);
+        if (payload) return payload;
+    }
+
+    return undefined;
+}
+
 function isAutoTextFile(file: any): boolean {
-    if (!file) return false;
+    if (!file || typeof file !== "object") return false;
+
     const name = String(file.name ?? "");
     const type = String(file.type ?? "");
+
     return name === "message.txt" && (!type || type === "text/plain");
 }
 
-function clearDraftAndUploads(channelId: string, DraftManager: any, UploadManager: any) {
-    for (const args of [
-        [channelId, 0],
-        [channelId],
-    ]) {
-        try {
-            DraftManager?.clearDraft?.(...args);
-        } catch {}
+function getChannelUploads(channelId: string, UploadAttachmentStore: any): any[] {
+    if (!UploadAttachmentStore?.getUploads) return [];
 
-        try {
-            UploadManager?.clearAll?.(...args);
-        } catch {}
-    }
+    try {
+        const typed = UploadAttachmentStore.getUploads(channelId, 0);
+        if (Array.isArray(typed)) return typed;
+    } catch {}
+
+    try {
+        const basic = UploadAttachmentStore.getUploads(channelId);
+        if (Array.isArray(basic)) return basic;
+    } catch {}
+
+    return [];
+}
+
+function getUploadFile(upload: any): any {
+    return upload?.item?.file ?? upload?.file;
+}
+
+function isGeneratedLongMessageUpload(upload: any): boolean {
+    const file = getUploadFile(upload);
+    return (
+        isAutoTextFile(file) &&
+        (upload?.showLargeMessageDialog === true ||
+            upload?.item?.showLargeMessageDialog === true)
+    );
+}
+
+function enqueueChannelTask(
+    channelId: string,
+    task: () => Promise<void>,
+    betweenTasksDelayMs = 0,
+): Promise<void> {
+    const hadPrevious = channelQueues.has(channelId);
+    const previous = channelQueues.get(channelId) ?? Promise.resolve();
+
+    const next = previous
+        .catch(() => {})
+        .then(async () => {
+            if (unloaded) return;
+            if (hadPrevious && betweenTasksDelayMs > 0) {
+                await sleep(betweenTasksDelayMs);
+            }
+            await task();
+        });
+
+    channelQueues.set(channelId, next);
+
+    const cleanup = () => {
+        if (channelQueues.get(channelId) === next) {
+            channelQueues.delete(channelId);
+        }
+    };
+
+    void next.then(cleanup, cleanup);
+    return next;
 }
 
 function patchMessageLengthConstants() {
@@ -234,6 +488,7 @@ function patchMessageLengthConstants() {
 
         const mod = target as Record<string, any>;
         let previousValues = patchedLengthModules.get(mod);
+
         if (!previousValues) previousValues = {};
 
         let touched = false;
@@ -247,11 +502,15 @@ function patchMessageLengthConstants() {
 
         for (const [key, descriptor] of Object.entries(descriptors)) {
             if (!key.includes("MESSAGE_LENGTH")) continue;
-            if (!("value" in descriptor) || typeof descriptor.value !== "number") continue;
+            if (!("value" in descriptor)) continue;
+            if (typeof descriptor.value !== "number") continue;
             if (descriptor.value <= 0 || descriptor.value > 10000) continue;
 
             try {
-                if (!(key in previousValues)) previousValues[key] = descriptor.value;
+                if (!(key in previousValues)) {
+                    previousValues[key] = descriptor.value;
+                }
+
                 mod[key] = 1_000_000;
                 touched = true;
             } catch {}
@@ -265,7 +524,9 @@ function patchMessageLengthConstants() {
             return (
                 module &&
                 typeof module === "object" &&
-                Object.keys(module).some((key) => key.includes("MESSAGE_LENGTH"))
+                Object.keys(module).some((key) =>
+                    key.includes("MESSAGE_LENGTH"),
+                )
             );
         } catch {
             return false;
@@ -292,6 +553,7 @@ function restoreMessageLengthConstants() {
 
 export default {
     onLoad() {
+        unloaded = false;
         storage.splitOnWords ??= false;
 
         const ChannelStore = findByStoreName("ChannelStore");
@@ -299,6 +561,7 @@ export default {
         const UserStore = findByStoreName("UserStore");
         const MessageActions = findByProps("sendMessage", "editMessage");
         const UploadHandler = findByProps("promptToUpload");
+        const UploadAttachmentStore = findByProps("getUploads");
         const DraftStore = findByProps("getDraft");
         const DraftManager = findByProps("clearDraft", "saveDraft");
         const UploadManager = findByProps("clearAll");
@@ -311,110 +574,314 @@ export default {
         const originalSendMessage = MessageActions.sendMessage.bind(MessageActions);
 
         const getMaxLength = () =>
-            UserStore?.getCurrentUser?.()?.premiumType === 2 ? NITRO_MESSAGE_LIMIT : MESSAGE_LIMIT;
+            UserStore?.getCurrentUser?.()?.premiumType === 2
+                ? NITRO_MESSAGE_LIMIT
+                : MESSAGE_LIMIT;
 
         const getSendDelay = (channelId: string) => {
             const channel = ChannelStore?.getChannel?.(channelId);
-            return Math.max((channel?.rateLimitPerUser ?? 0) * 1000, MIN_SEND_DELAY_MS);
+            return Math.max(
+                (channel?.rateLimitPerUser ?? 0) * 1000,
+                MIN_SEND_DELAY_MS,
+            );
         };
 
-        const splitContent = (content: string) =>
-            splitMarkdownMessage(content, getMaxLength(), Boolean(storage.splitOnWords));
+        const splitContent = (content: string): MarkdownSplitResult | false =>
+            splitMarkdownMessageDetailed(
+                content,
+                getMaxLength(),
+                Boolean(storage.splitOnWords),
+            );
 
-        const sendStandaloneChunks = async (channelId: string, chunks: string[]) => {
-            const delay = getSendDelay(channelId);
+        const getUnsentSource = (
+            split: MarkdownSplitResult,
+            sentChunks: number,
+        ): string => {
+            if (sentChunks <= 0) return split.normalized;
+            if (sentChunks >= split.chunks.length) return "";
 
-            for (let index = 0; index < chunks.length; index++) {
-                await originalSendMessage(channelId, {
-                    content: chunks[index],
-                    tts: false,
-                    invalidEmojis: [],
-                    validNonShortcutEmojis: [],
-                });
-
-                if (index < chunks.length - 1) await sleep(delay);
-            }
+            const sourceStart = split.sourceStarts[sentChunks];
+            return typeof sourceStart === "number"
+                ? split.normalized.slice(sourceStart)
+                : split.normalized;
         };
 
-        const startStandaloneSplit = (
+        const runStandaloneSplit = (
             channelId: string,
             content: string,
             source: string,
-        ): boolean => {
-            if (!content || content.length <= getMaxLength()) return false;
-            if (activeSplitChannels.has(channelId)) return true;
+            template?: Record<string, any>,
+            onFirstSuccess?: () => void,
+        ): Promise<void> => {
+            const split = splitContent(content);
 
-            const chunks = splitContent(content);
-            if (chunks === false || chunks.length === 0) {
+            if (split === false || split.chunks.length === 0) {
                 showFailure();
-                return true;
+                return Promise.resolve();
             }
 
-            activeSplitChannels.add(channelId);
-            clearDraftAndUploads(channelId, DraftManager, UploadManager);
+            const chunks = split.chunks;
+            const wasQueued = channelQueues.has(channelId);
 
-            logDebug(`Splitting oversized message from ${source}`, {
-                channelId,
-                length: content.length,
-                chunks: chunks.length,
-            });
+            const queued = enqueueChannelTask(channelId, async () => {
+                let sent = 0;
 
-            void sendStandaloneChunks(channelId, chunks)
-                .catch((error) => {
-                    console.error("[SplitLargeMessages] standalone split send failed", error);
-                    showFailure("SplitLargeMessages: sending failed");
-                })
-                .finally(() => activeSplitChannels.delete(channelId));
+                try {
+                    for (let index = 0; index < chunks.length; index++) {
+                        const payload =
+                            index === 0 && template
+                                ? { ...template, content: chunks[index] }
+                                : {
+                                      content: chunks[index],
+                                      tts: false,
+                                      invalidEmojis: [],
+                                      validNonShortcutEmojis: [],
+                                  };
 
-            return true;
+                        await originalSendMessage(channelId, payload);
+                        sent++;
+
+                        if (sent === 1) onFirstSuccess?.();
+
+                        if (index < chunks.length - 1) {
+                            await sleep(getSendDelay(channelId));
+                        }
+                    }
+                } catch (error) {
+                    console.error(
+                        `[SplitLargeMessages] ${source} split send failed`,
+                        error,
+                    );
+
+                    const unsent = getUnsentSource(split, sent);
+                    restoreUnsentContent(
+                        channelId,
+                        unsent,
+                        DraftStore,
+                        DraftManager,
+                    );
+
+                    throw error;
+                }
+            }, getSendDelay(channelId));
+
+            if (wasQueued) {
+                showToast(
+                    "SplitLargeMessages: queued long message",
+                    getAssetIDByName("Small"),
+                );
+            }
+
+            return queued;
         };
 
-        const processAutoTextFile = async (channelId: string, file: any): Promise<boolean> => {
-            if (!isAutoTextFile(file) || typeof file.text !== "function") return false;
-            if (activeSplitChannels.has(channelId)) return true;
+        const processAutoTextFile = async (
+            channelId: string,
+            file: any,
+            forceRetry = false,
+        ): Promise<boolean> => {
+            if (!isAutoTextFile(file) || typeof file.text !== "function") {
+                return false;
+            }
+
+            const state = autoTextStates.get(file);
+
+            if (state === "processing" || state === "done") return true;
+            if (state === "failed" && !forceRetry) return true;
 
             let text: string;
+
             try {
                 text = await file.text();
             } catch {
                 return false;
             }
 
-            return startStandaloneSplit(channelId, text, "message.txt");
-        };
+            if (!text || text.length <= getMaxLength()) return false;
 
-        const patchComposerTargets = () => {
-            const targets = collectTargetsWithMethods(["handleSendMessage"]);
+            autoTextStates.set(file, "processing");
 
-            for (const target of targets) {
-                if (patchedComposerTargets.has(target)) continue;
-                patchedComposerTargets.add(target);
+            const split = splitContent(text);
+
+            if (split === false || split.chunks.length === 0) {
+                autoTextStates.set(file, "failed");
+                showFailure();
+                return true;
+            }
+
+            const chunks = split.chunks;
+            const wasQueued = channelQueues.has(channelId);
+
+            const queued = enqueueChannelTask(channelId, async () => {
+                let sent = 0;
 
                 try {
-                    runtimeUnpatches.push(
-                        instead(
-                            "handleSendMessage",
-                            target,
-                            (args: any[], orig: (...callArgs: any[]) => any) => {
-                                const channelId = resolveChannelId(SelectedChannelStore, ...args);
-                                if (!channelId) return orig(...args);
+                    for (let index = 0; index < chunks.length; index++) {
+                        await originalSendMessage(channelId, {
+                            content: chunks[index],
+                            tts: false,
+                            invalidEmojis: [],
+                            validNonShortcutEmojis: [],
+                        });
 
-                                const direct = getLongestContent(args);
-                                const draft = getDraftText(channelId, DraftStore);
-                                const content = direct.length >= draft.length ? direct : draft;
+                        sent++;
 
-                                if (startStandaloneSplit(channelId, content, "handleSendMessage")) {
-                                    return undefined;
-                                }
+                        if (sent === 1) {
+                            clearDraftAndUploads(
+                                channelId,
+                                DraftManager,
+                                UploadManager,
+                            );
+                        }
 
-                                return orig(...args);
-                            },
-                        ),
+                        if (index < chunks.length - 1) {
+                            await sleep(getSendDelay(channelId));
+                        }
+                    }
+
+                    autoTextStates.set(file, "done");
+                } catch (error) {
+                    console.error(
+                        "[SplitLargeMessages] message.txt split send failed",
+                        error,
                     );
 
-                    logDebug("Patched handleSendMessage");
-                } catch (error) {
-                    console.error("[SplitLargeMessages] failed to patch handleSendMessage", error);
+                    if (sent === 0) {
+                        autoTextStates.set(file, "failed");
+                        showFailure(
+                            "SplitLargeMessages: send failed; message.txt kept for retry",
+                        );
+                        return;
+                    }
+
+                    autoTextStates.set(file, "done");
+
+                    const unsent = getUnsentSource(split, sent);
+                    restoreUnsentContent(
+                        channelId,
+                        unsent,
+                        DraftStore,
+                        DraftManager,
+                    );
+                }
+            }, getSendDelay(channelId));
+
+            if (wasQueued) {
+                showToast(
+                    "SplitLargeMessages: queued long message",
+                    getAssetIDByName("Small"),
+                );
+            }
+
+            void queued.catch(() => {});
+            return true;
+        };
+
+        const checkExistingAutoTextUploads = () => {
+            const channelId = SelectedChannelStore?.getChannelId?.();
+            if (!isSnowflakeLike(channelId)) return;
+
+            const uploads = getChannelUploads(channelId, UploadAttachmentStore);
+
+            for (const upload of uploads) {
+                if (!isGeneratedLongMessageUpload(upload)) continue;
+                const file = getUploadFile(upload);
+                if (autoTextStates.get(file)) continue;
+
+                void processAutoTextFile(channelId, file).catch((error) => {
+                    console.error(
+                        "[SplitLargeMessages] queued message.txt check failed",
+                        error,
+                    );
+                });
+            }
+        };
+
+        const patchTooLongGuardMethods = () => {
+            const booleanMethods = [
+                "isMessageTooLong",
+                "shouldShowLargeMessageDialog",
+                "shouldShowMessageTooLongDialog",
+            ] as const;
+
+            const maxLengthMethods = [
+                "getMaxMessageLength",
+                "getMessageLengthLimit",
+                "getMaxCharacterCount",
+            ] as const;
+
+            const targets = collectTargetsWithMethods([
+                ...booleanMethods,
+                ...maxLengthMethods,
+            ]);
+
+            for (const target of targets) {
+                if (patchedGuardTargets.has(target)) continue;
+
+                const looksLikeMessageGuardTarget = booleanMethods.some(
+                    (method) => typeof target[method] === "function",
+                );
+                if (!looksLikeMessageGuardTarget) continue;
+
+                patchedGuardTargets.add(target);
+
+                for (const method of booleanMethods) {
+                    if (typeof target[method] !== "function") continue;
+
+                    try {
+                        runtimeUnpatches.push(
+                            instead(
+                                method,
+                                target,
+                                (args: any[], orig: (...callArgs: any[]) => any) => {
+                                    const result = orig(...args);
+                                    if (result !== true) return result;
+
+                                    const channelId =
+                                        resolveChannelIdFromObjects(
+                                            SelectedChannelStore,
+                                            ...args,
+                                        ) ??
+                                        SelectedChannelStore?.getChannelId?.();
+
+                                    const direct = getLongestContent(args);
+                                    const draft = isSnowflakeLike(channelId)
+                                        ? getDraftText(channelId, DraftStore)
+                                        : "";
+                                    const content =
+                                        direct.length >= draft.length
+                                            ? direct
+                                            : draft;
+
+                                    return content.length > getMaxLength()
+                                        ? false
+                                        : result;
+                                },
+                            ),
+                        );
+                    } catch {}
+                }
+
+                for (const method of maxLengthMethods) {
+                    if (typeof target[method] !== "function") continue;
+
+                    try {
+                        runtimeUnpatches.push(
+                            instead(
+                                method,
+                                target,
+                                (args: any[], orig: (...callArgs: any[]) => any) => {
+                                    const result = orig(...args);
+
+                                    return typeof result === "number" &&
+                                        result > 0 &&
+                                        result <= 10000
+                                        ? 1_000_000
+                                        : result;
+                                },
+                            ),
+                        );
+                    } catch {}
                 }
             }
         };
@@ -425,6 +892,7 @@ export default {
                 "showMessageTooLongDialog",
                 "openLargeMessageDialog",
             ] as const;
+
             const targets = collectTargetsWithMethods([...methods]);
 
             for (const target of targets) {
@@ -440,37 +908,66 @@ export default {
                                 method,
                                 target,
                                 (args: any[], orig: (...callArgs: any[]) => any) => {
-                                    const channelId = resolveChannelId(SelectedChannelStore, ...args);
-                                    if (!channelId) return orig(...args);
+                                    const channelId =
+                                        resolveChannelIdFromObjects(
+                                            SelectedChannelStore,
+                                            ...args,
+                                        ) ??
+                                        SelectedChannelStore?.getChannelId?.();
 
-                                    const direct = getLongestContent(args);
-                                    const draft = getDraftText(channelId, DraftStore);
-                                    const content = direct.length >= draft.length ? direct : draft;
-
-                                    if (startStandaloneSplit(channelId, content, method)) {
-                                        return undefined;
+                                    if (!isSnowflakeLike(channelId)) {
+                                        return orig(...args);
                                     }
 
-                                    return orig(...args);
+                                    const direct = getLongestContent(args);
+                                    const draft = getDraftText(
+                                        channelId,
+                                        DraftStore,
+                                    );
+                                    const content =
+                                        direct.length >= draft.length
+                                            ? direct
+                                            : draft;
+
+                                    if (
+                                        !content ||
+                                        content.length <= getMaxLength()
+                                    ) {
+                                        return orig(...args);
+                                    }
+
+                                    const template = findMessagePayload(args);
+
+                                    void runStandaloneSplit(
+                                        channelId,
+                                        content,
+                                        method,
+                                        template,
+                                        () =>
+                                            clearDraftAndUploads(
+                                                channelId,
+                                                DraftManager,
+                                                UploadManager,
+                                            ),
+                                    ).catch(() => {});
+
+                                    return undefined;
                                 },
                             ),
                         );
-
-                        logDebug(`Patched ${method}`);
                     } catch {}
                 }
             }
         };
 
-        const patchComposerGates = () => {
-            patchMessageLengthConstants();
-            patchComposerTargets();
-            patchLargeMessageDialogs();
-        };
+        const patchRuntimeTargets = () => {
+            if (unloaded) return;
 
-        patchComposerGates();
-        retryTimers.push(setTimeout(patchComposerGates, 3000));
-        retryTimers.push(setTimeout(patchComposerGates, 10000));
+            patchMessageLengthConstants();
+            patchTooLongGuardMethods();
+            patchLargeMessageDialogs();
+            checkExistingAutoTextUploads();
+        };
 
         unpatchSend?.();
         unpatchUpload?.();
@@ -479,64 +976,88 @@ export default {
             "sendMessage",
             MessageActions,
             (args: any[], orig: (...callArgs: any[]) => any) => {
-                const sendArgs = args as any[];
+                const sendArgs = [...args];
                 const { message } = getMessageLocation(sendArgs);
                 const content = extractContent(message);
-                const channelId = resolveChannelId(
+                const channelId = resolveSendChannelId(
                     SelectedChannelStore,
-                    sendArgs[0],
-                    sendArgs[1],
-                    message,
+                    sendArgs,
                 );
 
-                if (!channelId || !content || content.length <= getMaxLength()) {
+                if (
+                    !channelId ||
+                    !content ||
+                    content.length <= getMaxLength()
+                ) {
                     return orig(...sendArgs);
                 }
 
-                if (activeSplitChannels.has(channelId)) {
-                    logDebug("Suppressed duplicate oversized send while split is active", channelId);
-                    return undefined;
-                }
+                const split = splitContent(content);
 
-                const chunks = splitContent(content);
-                if (chunks === false || chunks.length === 0) {
+                if (split === false || split.chunks.length === 0) {
                     showFailure();
                     return undefined;
                 }
 
-                activeSplitChannels.add(channelId);
-                clearDraftAndUploads(channelId, DraftManager, UploadManager);
+                const chunks = split.chunks;
+                const wasQueued = channelQueues.has(channelId);
 
-                logDebug("Splitting oversized sendMessage call", {
-                    channelId,
-                    length: content.length,
-                    chunks: chunks.length,
-                });
-
-                void (async () => {
-                    const delay = getSendDelay(channelId);
+                const queued = enqueueChannelTask(channelId, async () => {
+                    let sent = 0;
 
                     try {
                         for (let index = 0; index < chunks.length; index++) {
-                            const chunkArgs = buildChunkArgs(
-                                sendArgs,
-                                channelId,
-                                chunks[index],
-                                index === 0,
-                            );
+                            if (index === 0) {
+                                const firstArgs = buildChunkArgs(
+                                    sendArgs,
+                                    channelId,
+                                    chunks[index],
+                                    true,
+                                );
+                                await orig(...firstArgs);
+                            } else {
+                                await originalSendMessage(channelId, {
+                                    content: chunks[index],
+                                    tts: false,
+                                    invalidEmojis:
+                                        message.invalidEmojis ?? [],
+                                    validNonShortcutEmojis:
+                                        message.validNonShortcutEmojis ?? [],
+                                });
+                            }
 
-                            await orig(...chunkArgs);
-                            if (index < chunks.length - 1) await sleep(delay);
+                            sent++;
+
+                            if (index < chunks.length - 1) {
+                                await sleep(getSendDelay(channelId));
+                            }
                         }
                     } catch (error) {
-                        console.error("[SplitLargeMessages] split send failed", error);
-                        showFailure("SplitLargeMessages: sending failed");
-                    } finally {
-                        activeSplitChannels.delete(channelId);
-                    }
-                })();
+                        console.error(
+                            "[SplitLargeMessages] split send failed",
+                            error,
+                        );
 
-                return undefined;
+                        const unsent = getUnsentSource(split, sent);
+                        restoreUnsentContent(
+                            channelId,
+                            unsent,
+                            DraftStore,
+                            DraftManager,
+                        );
+
+                        throw error;
+                    }
+                }, getSendDelay(channelId));
+
+                if (wasQueued) {
+                    showToast(
+                        "SplitLargeMessages: queued long message",
+                        getAssetIDByName("Small"),
+                    );
+                }
+
+                return queued;
             },
         );
 
@@ -545,23 +1066,45 @@ export default {
                 "promptToUpload",
                 UploadHandler,
                 (args: any[], orig: (...callArgs: any[]) => any) => {
-                    const [files, channel, draftType] = args as [any[], any, number | undefined];
-                    const file = files?.[0];
-                    const channelId = resolveChannelId(SelectedChannelStore, channel);
-                    const isChannelDraft = draftType === 0 || draftType == null;
+                    const [files, channel, draftType] = args as [
+                        any[],
+                        any,
+                        number | undefined,
+                    ];
 
-                    if (!channelId || !isChannelDraft || !isAutoTextFile(file)) {
+                    const file = files?.[0];
+                    const channelId =
+                        resolveChannelIdFromObjects(
+                            SelectedChannelStore,
+                            channel,
+                        ) ?? SelectedChannelStore?.getChannelId?.();
+                    const isChannelDraft =
+                        draftType === 0 || draftType == null;
+
+                    if (
+                        !isSnowflakeLike(channelId) ||
+                        !isChannelDraft ||
+                        !isAutoTextFile(file)
+                    ) {
                         return orig(...args);
                     }
 
-                    if (activeSplitChannels.has(channelId)) return undefined;
+                    const forceRetry =
+                        autoTextStates.get(file) === "failed";
 
-                    void processAutoTextFile(channelId, file)
+                    void processAutoTextFile(
+                        channelId,
+                        file,
+                        forceRetry,
+                    )
                         .then((handled) => {
                             if (!handled) return orig(...args);
                         })
                         .catch((error) => {
-                            console.error("[SplitLargeMessages] message.txt interception failed", error);
+                            console.error(
+                                "[SplitLargeMessages] message.txt interception failed",
+                                error,
+                            );
                             return orig(...args);
                         });
 
@@ -570,10 +1113,33 @@ export default {
             );
         }
 
-        logDebug("Loaded composer-gate send path");
+        const onChannelSelect = () => {
+            setTimeout(patchRuntimeTargets, 250);
+        };
+
+        try {
+            FluxDispatcher?.subscribe?.("CHANNEL_SELECT", onChannelSelect);
+            runtimeUnpatches.push(() =>
+                FluxDispatcher?.unsubscribe?.(
+                    "CHANNEL_SELECT",
+                    onChannelSelect,
+                ),
+            );
+        } catch {}
+
+        patchRuntimeTargets();
+
+        patchSweepInterval = setInterval(
+            patchRuntimeTargets,
+            PATCH_SWEEP_INTERVAL_MS,
+        );
+
+        logDebug("Loaded reviewed split pipeline");
     },
 
     onUnload() {
+        unloaded = true;
+
         unpatchUpload?.();
         unpatchUpload = undefined;
 
@@ -586,14 +1152,14 @@ export default {
             } catch {}
         }
 
-        while (retryTimers.length) {
-            const timer = retryTimers.pop();
-            if (timer) clearTimeout(timer);
+        if (patchSweepInterval) {
+            clearInterval(patchSweepInterval);
+            patchSweepInterval = undefined;
         }
 
-        patchedComposerTargets.clear();
         patchedDialogTargets.clear();
-        activeSplitChannels.clear();
+        patchedGuardTargets.clear();
+        channelQueues.clear();
         restoreMessageLengthConstants();
     },
 
