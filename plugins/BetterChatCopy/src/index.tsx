@@ -310,7 +310,11 @@ async function waitForStoreBatch(
         const collection = getMessageCollection(channelId);
 
         if (hasNewMessage) return latest;
-        if (!collection?.loadingMore && attempt >= 4) return latest;
+
+        const hasKnownLoadingFlag = typeof collection?.loadingMore === "boolean";
+        if (hasKnownLoadingFlag && collection.loadingMore === false && attempt >= 4) {
+            return latest;
+        }
 
         await delay(FETCH_SETTLE_DELAY_MS);
         latest = getStoreBatch(channelId, cursor, direction, limit);
@@ -330,7 +334,6 @@ async function fetchBatch(
     }
 
     const cached = getStoreBatch(channelId, cursor, direction, limit);
-    if (cached.length >= limit) return cached;
 
     const previousIds = new Set(
         getMessagesArray(channelId)
@@ -341,9 +344,9 @@ async function fetchBatch(
     const args: any = { channelId, limit };
     args[direction === "up" ? "before" : "after"] = cursor;
 
-    const result = MessageActions.fetchMessages(args);
+    let result = MessageActions.fetchMessages(args);
     if (result && typeof result.then === "function") {
-        await result;
+        result = await result;
     }
 
     const direct = extractMessages(result);

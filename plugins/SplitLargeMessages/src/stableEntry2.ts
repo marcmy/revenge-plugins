@@ -5,7 +5,7 @@ import { storage } from "@vendetta/plugin";
 import { getAssetIDByName } from "@vendetta/ui/assets";
 import { showToast } from "@vendetta/ui/toasts";
 
-import { splitMarkdownMessage } from "./markdownSplitter";
+import { splitMarkdownMessageDetailed, type MarkdownSplitResult } from "./markdownSplitter";
 import settings from "./settings";
 
 const MESSAGE_LIMIT = 2000;
@@ -185,18 +185,43 @@ function isSnowflakeLike(value: unknown): value is string {
     return typeof value === "string" && /^\d{10,25}$/.test(value);
 }
 
+function getChannelIdFromObject(value: any): string | undefined {
+    if (!value || typeof value !== "object") return undefined;
+
+    const direct = value.channelId ?? value.channel_id;
+    if (isSnowflakeLike(direct)) return direct;
+
+    const nested = value.channel?.id;
+    if (isSnowflakeLike(nested)) return nested;
+
+    const rootId = value.id;
+    const looksLikeMessage =
+        "content" in value ||
+        "author" in value ||
+        "message_reference" in value ||
+        "messageReference" in value;
+    const looksLikeChannel =
+        !looksLikeMessage &&
+        isSnowflakeLike(rootId) &&
+        (
+            typeof value.type === "number" ||
+            "recipients" in value ||
+            "parent_id" in value ||
+            "parentId" in value ||
+            typeof value.isPrivate === "function" ||
+            typeof value.isGuildVocal === "function"
+        );
+
+    return looksLikeChannel ? rootId : undefined;
+}
+
 function resolveChannelIdFromObjects(
     SelectedChannelStore: any,
     ...values: any[]
 ): string | undefined {
     for (const value of values) {
-        if (!value || typeof value !== "object") continue;
-
-        const direct = value.channelId ?? value.channel_id;
-        if (isSnowflakeLike(direct)) return direct;
-
-        const nested = value.channel?.id;
-        if (isSnowflakeLike(nested)) return nested;
+        const channelId = getChannelIdFromObject(value);
+        if (channelId) return channelId;
     }
 
     const selected = SelectedChannelStore?.getChannelId?.();
@@ -233,7 +258,12 @@ function getDraftText(channelId: string, DraftStore: any): string {
     return "";
 }
 
-function saveDraftText(channelId: string, text: string, DraftManager: any): boolean {
+function saveDraftText(
+    channelId: string,
+    text: string,
+    DraftStore: any,
+    DraftManager: any,
+): boolean {
     if (!text || !DraftManager?.saveDraft) return false;
 
     const attempts = [
@@ -245,7 +275,7 @@ function saveDraftText(channelId: string, text: string, DraftManager: any): bool
     for (const attempt of attempts) {
         try {
             attempt();
-            return true;
+            if (getDraftText(channelId, DraftStore) === text) return true;
         } catch {}
     }
 
@@ -278,7 +308,7 @@ function restoreUnsentContent(
     const currentDraft = getDraftText(channelId, DraftStore);
 
     if (!currentDraft || currentDraft === text) {
-        if (saveDraftText(channelId, text, DraftManager)) {
+        if (saveDraftText(channelId, text, DraftStore, DraftManager)) {
             showFailure("Unsent message parts restored to the draft");
             return;
         }
@@ -413,16 +443,30 @@ function getUploadFile(upload: any): any {
     return upload?.item?.file ?? upload?.file;
 }
 
+function isGeneratedLongMessageUpload(upload: any): boolean {
+    const file = getUploadFile(upload);
+    return (
+        isAutoTextFile(file) &&
+        (upload?.showLargeMessageDialog === true ||
+            upload?.item?.showLargeMessageDialog === true)
+    );
+}
+
 function enqueueChannelTask(
     channelId: string,
     task: () => Promise<void>,
+    betweenTasksDelayMs = 0,
 ): Promise<void> {
+    const hadPrevious = channelQueues.has(channelId);
     const previous = channelQueues.get(channelId) ?? Promise.resolve();
 
     const next = previous
         .catch(() => {})
         .then(async () => {
             if (unloaded) return;
+            if (hadPrevious && betweenTasksDelayMs > 0) {
+                await sleep(betweenTasksDelayMs);
+            }
             await task();
         });
 
@@ -542,12 +586,25 @@ export default {
             );
         };
 
-        const splitContent = (content: string) =>
-            splitMarkdownMessage(
+        const splitContent = (content: string): MarkdownSplitResult | false =>
+            splitMarkdownMessageDetailed(
                 content,
                 getMaxLength(),
                 Boolean(storage.splitOnWords),
             );
+
+        const getUnsentSource = (
+            split: MarkdownSplitResult,
+            sentChunks: number,
+        ): string => {
+            if (sentChunks <= 0) return split.normalized;
+            if (sentChunks >= split.chunks.length) return "";
+
+            const sourceStart = split.sourceStarts[sentChunks];
+            return typeof sourceStart === "number"
+                ? split.normalized.slice(sourceStart)
+                : split.normalized;
+        };
 
         const runStandaloneSplit = (
             channelId: string,
@@ -556,13 +613,14 @@ export default {
             template?: Record<string, any>,
             onFirstSuccess?: () => void,
         ): Promise<void> => {
-            const chunks = splitContent(content);
+            const split = splitContent(content);
 
-            if (chunks === false || chunks.length === 0) {
+            if (split === false || split.chunks.length === 0) {
                 showFailure();
                 return Promise.resolve();
             }
 
+            const chunks = split.chunks;
             const wasQueued = channelQueues.has(channelId);
 
             const queued = enqueueChannelTask(channelId, async () => {
@@ -595,7 +653,7 @@ export default {
                         error,
                     );
 
-                    const unsent = chunks.slice(sent).join("");
+                    const unsent = getUnsentSource(split, sent);
                     restoreUnsentContent(
                         channelId,
                         unsent,
@@ -605,7 +663,7 @@ export default {
 
                     throw error;
                 }
-            });
+            }, getSendDelay(channelId));
 
             if (wasQueued) {
                 showToast(
@@ -643,14 +701,15 @@ export default {
 
             autoTextStates.set(file, "processing");
 
-            const chunks = splitContent(text);
+            const split = splitContent(text);
 
-            if (chunks === false || chunks.length === 0) {
+            if (split === false || split.chunks.length === 0) {
                 autoTextStates.set(file, "failed");
                 showFailure();
                 return true;
             }
 
+            const chunks = split.chunks;
             const wasQueued = channelQueues.has(channelId);
 
             const queued = enqueueChannelTask(channelId, async () => {
@@ -697,7 +756,7 @@ export default {
 
                     autoTextStates.set(file, "done");
 
-                    const unsent = chunks.slice(sent).join("");
+                    const unsent = getUnsentSource(split, sent);
                     restoreUnsentContent(
                         channelId,
                         unsent,
@@ -705,7 +764,7 @@ export default {
                         DraftManager,
                     );
                 }
-            });
+            }, getSendDelay(channelId));
 
             if (wasQueued) {
                 showToast(
@@ -725,8 +784,8 @@ export default {
             const uploads = getChannelUploads(channelId, UploadAttachmentStore);
 
             for (const upload of uploads) {
+                if (!isGeneratedLongMessageUpload(upload)) continue;
                 const file = getUploadFile(upload);
-                if (!isAutoTextFile(file)) continue;
                 if (autoTextStates.get(file)) continue;
 
                 void processAutoTextFile(channelId, file).catch((error) => {
@@ -741,7 +800,6 @@ export default {
         const patchTooLongGuardMethods = () => {
             const booleanMethods = [
                 "isMessageTooLong",
-                "isContentTooLong",
                 "shouldShowLargeMessageDialog",
                 "shouldShowMessageTooLongDialog",
             ] as const;
@@ -759,6 +817,12 @@ export default {
 
             for (const target of targets) {
                 if (patchedGuardTargets.has(target)) continue;
+
+                const looksLikeMessageGuardTarget = booleanMethods.some(
+                    (method) => typeof target[method] === "function",
+                );
+                if (!looksLikeMessageGuardTarget) continue;
+
                 patchedGuardTargets.add(target);
 
                 for (const method of booleanMethods) {
@@ -879,6 +943,12 @@ export default {
                                         content,
                                         method,
                                         template,
+                                        () =>
+                                            clearDraftAndUploads(
+                                                channelId,
+                                                DraftManager,
+                                                UploadManager,
+                                            ),
                                     ).catch(() => {});
 
                                     return undefined;
@@ -922,13 +992,14 @@ export default {
                     return orig(...sendArgs);
                 }
 
-                const chunks = splitContent(content);
+                const split = splitContent(content);
 
-                if (chunks === false || chunks.length === 0) {
+                if (split === false || split.chunks.length === 0) {
                     showFailure();
                     return undefined;
                 }
 
+                const chunks = split.chunks;
                 const wasQueued = channelQueues.has(channelId);
 
                 const queued = enqueueChannelTask(channelId, async () => {
@@ -967,7 +1038,7 @@ export default {
                             error,
                         );
 
-                        const unsent = chunks.slice(sent).join("");
+                        const unsent = getUnsentSource(split, sent);
                         restoreUnsentContent(
                             channelId,
                             unsent,
@@ -977,7 +1048,7 @@ export default {
 
                         throw error;
                     }
-                });
+                }, getSendDelay(channelId));
 
                 if (wasQueued) {
                     showToast(
