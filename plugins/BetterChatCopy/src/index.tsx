@@ -2,6 +2,7 @@ import { findByProps, findByStoreName } from "@vendetta/metro";
 import { React, ReactNative } from "@vendetta/metro/common";
 import { before, after } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
+import { semanticColors } from "@vendetta/ui";
 import { showConfirmationAlert } from "@vendetta/ui/alerts";
 import { getAssetIDByName } from "@vendetta/ui/assets";
 import { Forms } from "@vendetta/ui/components";
@@ -23,6 +24,8 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 const MAX_MESSAGES = 2000;
+const TEXT_NORMAL = (semanticColors as any).TEXT_NORMAL ?? "#dbdee1";
+const TEXT_MUTED = (semanticColors as any).TEXT_MUTED ?? (semanticColors as any).TEXT_LOW_CONTRAST ?? "#949ba4";
 const FETCH_BATCH_SIZE = 100;
 const unpatches: Array<() => void> = [];
 
@@ -325,7 +328,8 @@ function CopyWindow({ message, onTextChange }: { message: any; onTextChange: (te
                     onChangeText={setCount}
                     keyboardType="number-pad"
                     placeholder="100"
-                    style={{ minHeight: 44, paddingHorizontal: 12, borderRadius: 8 }}
+                    placeholderTextColor={TEXT_MUTED}
+                    style={{ minHeight: 44, paddingHorizontal: 12, borderRadius: 8, color: TEXT_NORMAL }}
                 />
             </Forms.FormSection>
 
@@ -354,7 +358,8 @@ function CopyWindow({ message, onTextChange }: { message: any; onTextChange: (te
                 multiline
                 textAlignVertical="top"
                 placeholder="Load messages to preview and edit the copied text."
-                style={{ minHeight: 260, maxHeight: 420, padding: 12, borderRadius: 8 }}
+                placeholderTextColor={TEXT_MUTED}
+                style={{ minHeight: 260, maxHeight: 420, padding: 12, borderRadius: 8, color: TEXT_NORMAL }}
             />
         </ReactNative.View>
     );
@@ -468,7 +473,8 @@ function SettingsScreen() {
                     value={String(settings.defaultMessageCount)}
                     onChangeText={(value) => update({ defaultMessageCount: clampCount(value) })}
                     keyboardType="number-pad"
-                    style={{ minHeight: 44, marginHorizontal: 16, paddingHorizontal: 12, borderRadius: 8 }}
+                    placeholderTextColor={TEXT_MUTED}
+                    style={{ minHeight: 44, marginHorizontal: 16, paddingHorizontal: 12, borderRadius: 8, color: TEXT_NORMAL }}
                 />
                 <Forms.FormSwitchRow
                     label="Include timestamps"
