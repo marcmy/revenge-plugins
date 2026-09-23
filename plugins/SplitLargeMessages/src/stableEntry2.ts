@@ -16,6 +16,17 @@ const PATCH_SWEEP_MAX_ATTEMPTS = 6;
 const CHANNEL_DISCOVERY_INITIAL_DELAY_MS = 250;
 const CHANNEL_DISCOVERY_RETRY_INTERVAL_MS = 500;
 const CHANNEL_DISCOVERY_MAX_ATTEMPTS = 3;
+const MESSAGE_COMPOSER_GUARD_METHODS = [
+    "isMessageTooLong",
+    "isContentTooLong",
+    "shouldShowLargeMessageDialog",
+    "shouldShowMessageTooLongDialog",
+] as const;
+const MESSAGE_COMPOSER_SPECIFIC_GUARD_METHODS = [
+    "isMessageTooLong",
+    "shouldShowLargeMessageDialog",
+    "shouldShowMessageTooLongDialog",
+] as const;
 
 let unpatchSend: (() => void) | undefined;
 let unpatchUpload: (() => void) | undefined;
@@ -34,10 +45,7 @@ const autoTextStates = new WeakMap<object, "processing" | "failed" | "done">();
 const autoTextProcessingGenerations = new WeakMap<object, number>();
 const autoTextSourceTexts = new WeakMap<object, string>();
 const autoTextFirstChunkSent = new WeakSet<object>();
-const pendingAutoTextRestorations = new WeakMap<
-    object,
-    (sourceText: string) => void
->();
+const pendingAutoTextRestorations = new WeakMap<object, string[]>();
 const pendingAutoTextFirstChunkSends = new WeakMap<
     object,
     PendingAutoTextSends
@@ -668,14 +676,25 @@ function patchMessageLengthConstants() {
         if (touched) patchedLengthModules.set(mod, previousValues);
     };
 
+    const hasMessageComposerGuard = (value: any) => {
+        if (!value || typeof value !== "object") return false;
+
+        try {
+            return MESSAGE_COMPOSER_SPECIFIC_GUARD_METHODS.some(
+                (method) => typeof value[method] === "function",
+            );
+        } catch {
+            return false;
+        }
+    };
+
     const modules = findAll((module) => {
         try {
             return (
                 module &&
                 typeof module === "object" &&
-                Object.keys(module).some((key) =>
-                    key.includes("MESSAGE_LENGTH"),
-                )
+                (hasMessageComposerGuard(module) ||
+                    safeObjectValues(module).some(hasMessageComposerGuard))
             );
         } catch {
             return false;
@@ -683,8 +702,15 @@ function patchMessageLengthConstants() {
     }) as Array<Record<string, any>>;
 
     for (const module of modules) {
-        patchTarget(module);
-        for (const value of safeObjectValues(module)) patchTarget(value);
+        const values = safeObjectValues(module);
+        const moduleHasGuard = hasMessageComposerGuard(module);
+        const nestedValuesHaveGuard = values.some(hasMessageComposerGuard);
+
+        if (moduleHasGuard || nestedValuesHaveGuard) patchTarget(module);
+
+        for (const value of values) {
+            if (hasMessageComposerGuard(value)) patchTarget(value);
+        }
     }
 }
 
@@ -776,7 +802,6 @@ export default {
             autoTextSourceTexts.delete(file);
             autoTextFirstChunkSent.delete(file);
             autoTextFirstChunkStarted.delete(file);
-            pendingAutoTextRestorations.delete(file);
             pendingAutoTextFirstChunkSends.delete(file);
             return undefined;
         };
@@ -885,11 +910,11 @@ export default {
             try {
                 text = await file.text();
             } catch {
+                restorePendingAutoTextSendTexts(channelId, file);
                 if (state === "failed") autoTextStates.set(file, "failed");
                 else autoTextStates.delete(file);
                 autoTextProcessingGenerations.delete(file);
                 autoTextSourceTexts.delete(file);
-                pendingAutoTextRestorations.delete(file);
                 pendingAutoTextFirstChunkSends.delete(file);
                 return false;
             }
@@ -899,11 +924,11 @@ export default {
                     return true;
                 }
 
+                restorePendingAutoTextSendTexts(channelId, file);
                 if (state === "failed") autoTextStates.set(file, "failed");
                 else autoTextStates.delete(file);
                 autoTextProcessingGenerations.delete(file);
                 autoTextSourceTexts.delete(file);
-                pendingAutoTextRestorations.delete(file);
                 pendingAutoTextFirstChunkSends.delete(file);
                 return false;
             }
@@ -911,11 +936,11 @@ export default {
             autoTextSourceTexts.set(file, text);
 
             if (!text || text.length <= getMaxLength()) {
+                restorePendingAutoTextSendTexts(channelId, file, text);
                 if (state === "failed") autoTextStates.set(file, "failed");
                 else autoTextStates.delete(file);
                 autoTextProcessingGenerations.delete(file);
                 autoTextSourceTexts.delete(file);
-                pendingAutoTextRestorations.delete(file);
                 pendingAutoTextFirstChunkSends.delete(file);
                 return false;
             }
@@ -923,9 +948,9 @@ export default {
             const split = splitContent(text);
 
             if (split === false || split.chunks.length === 0) {
+                restorePendingAutoTextSendTexts(channelId, file, text);
                 autoTextStates.set(file, "failed");
                 autoTextProcessingGenerations.delete(file);
-                pendingAutoTextRestorations.delete(file);
                 pendingAutoTextFirstChunkSends.delete(file);
                 showFailure();
                 return false;
@@ -948,21 +973,18 @@ export default {
                             autoTextStates.delete(file);
                         }
                         autoTextProcessingGenerations.delete(file);
-                        pendingAutoTextRestorations.delete(file);
                         pendingAutoTextFirstChunkSends.delete(file);
 
                         const restaged = await stageAutoTextFileForRetry(
                             channelId,
                             file,
                         );
-                        if (!restaged) {
-                            restoreUnsentContent(
-                                channelId,
-                                split.normalized,
-                                DraftStore,
-                                DraftManager,
-                            );
-                        }
+                        restorePendingAutoTextSendTexts(
+                            channelId,
+                            file,
+                            text,
+                            restaged ? undefined : split.normalized,
+                        );
                     }
                     return;
                 }
@@ -973,20 +995,17 @@ export default {
                 ) {
                     autoTextStates.set(file, "failed");
                     autoTextProcessingGenerations.delete(file);
-                    pendingAutoTextRestorations.delete(file);
                     pendingAutoTextFirstChunkSends.delete(file);
                     const restaged = await stageAutoTextFileForRetry(
                         channelId,
                         file,
                     );
-                    if (!restaged) {
-                        restoreUnsentContent(
-                            channelId,
-                            split.normalized,
-                            DraftStore,
-                            DraftManager,
-                        );
-                    }
+                    restorePendingAutoTextSendTexts(
+                        channelId,
+                        file,
+                        text,
+                        restaged ? undefined : split.normalized,
+                    );
                     showFailure(
                         "SplitLargeMessages: other attachments are still staged; retry the generated text with them or remove them first",
                     );
@@ -1003,13 +1022,17 @@ export default {
 
                         if (index === 0) autoTextFirstChunkStarted.add(file);
 
+                        let firstChunkAttachmentsSent = false;
                         if (sendFirstChunk) {
-                            await sendFirstChunk.send(
-                                chunks[index],
-                                true,
-                                [],
-                            );
-                        } else {
+                            firstChunkAttachmentsSent =
+                                await sendFirstChunk.send(
+                                    chunks[index],
+                                    true,
+                                    [],
+                                );
+                        }
+
+                        if (!firstChunkAttachmentsSent) {
                             await originalSendMessage(channelId, {
                                 content: chunks[index],
                                 tts: false,
@@ -1024,7 +1047,9 @@ export default {
                             autoTextFirstChunkSent.add(file);
 
                             const successfullySentUploads = [
-                                ...(sendFirstChunk?.uploads ?? []),
+                                ...(firstChunkAttachmentsSent
+                                    ? (sendFirstChunk?.uploads ?? [])
+                                    : []),
                             ];
                             let trailingIndex = 0;
 
@@ -1105,18 +1130,6 @@ export default {
                                     "SplitLargeMessages: could not restore every other attachment after the text send",
                                 );
                             }
-
-                            try {
-                                const restorePendingText =
-                                    pendingAutoTextRestorations.get(file);
-                                pendingAutoTextRestorations.delete(file);
-                                restorePendingText?.(text);
-                            } catch (error) {
-                                console.error(
-                                    "[SplitLargeMessages] failed to restore text after upload retry",
-                                    error,
-                                );
-                            }
                         }
 
                         if (index < chunks.length - 1) {
@@ -1124,9 +1137,9 @@ export default {
                         }
                     }
 
+                    restorePendingAutoTextSendTexts(channelId, file, text);
                     autoTextStates.set(file, "done");
                     autoTextProcessingGenerations.delete(file);
-                    pendingAutoTextRestorations.delete(file);
                     pendingAutoTextFirstChunkSends.delete(file);
                 } catch (error) {
                     console.error(
@@ -1137,20 +1150,17 @@ export default {
                     if (sent === 0) {
                         autoTextStates.set(file, "failed");
                         autoTextProcessingGenerations.delete(file);
-                        pendingAutoTextRestorations.delete(file);
                         pendingAutoTextFirstChunkSends.delete(file);
                         const restaged = await stageAutoTextFileForRetry(
                             channelId,
                             file,
                         );
-                        if (!restaged) {
-                            restoreUnsentContent(
-                                channelId,
-                                split.normalized,
-                                DraftStore,
-                                DraftManager,
-                            );
-                        }
+                        restorePendingAutoTextSendTexts(
+                            channelId,
+                            file,
+                            text,
+                            restaged ? undefined : split.normalized,
+                        );
                         showFailure(
                             restaged
                                 ? "SplitLargeMessages: send failed; message.txt kept for retry"
@@ -1163,13 +1173,12 @@ export default {
                     autoTextProcessingGenerations.delete(file);
 
                     const unsent = getUnsentSource(split, sent);
-                    restoreUnsentContent(
+                    restorePendingAutoTextSendTexts(
                         channelId,
+                        file,
+                        text,
                         unsent,
-                        DraftStore,
-                        DraftManager,
                     );
-                    pendingAutoTextRestorations.delete(file);
                     pendingAutoTextFirstChunkSends.delete(file);
                 }
             }, getSendDelay(channelId));
@@ -1195,21 +1204,18 @@ export default {
                     if (state === "failed") autoTextStates.set(file, "failed");
                     else autoTextStates.delete(file);
                     autoTextProcessingGenerations.delete(file);
-                    pendingAutoTextRestorations.delete(file);
                     pendingAutoTextFirstChunkSends.delete(file);
 
                     const restaged = await stageAutoTextFileForRetry(
                         channelId,
                         file,
                     );
-                    if (!restaged) {
-                        restoreUnsentContent(
-                            channelId,
-                            split.normalized,
-                            DraftStore,
-                            DraftManager,
-                        );
-                    }
+                    restorePendingAutoTextSendTexts(
+                        channelId,
+                        file,
+                        text,
+                        restaged ? undefined : split.normalized,
+                    );
                 },
                 (error) => {
                     console.error(
@@ -1251,12 +1257,7 @@ export default {
         };
 
         const patchTooLongGuardMethods = () => {
-            const booleanMethods = [
-                "isMessageTooLong",
-                "isContentTooLong",
-                "shouldShowLargeMessageDialog",
-                "shouldShowMessageTooLongDialog",
-            ] as const;
+            const booleanMethods = MESSAGE_COMPOSER_GUARD_METHODS;
 
             const maxLengthMethods = [
                 "getMaxMessageLength",
@@ -1276,6 +1277,11 @@ export default {
                     (method) => typeof target[method] === "function",
                 );
                 if (!looksLikeMessageGuardTarget) continue;
+
+                const looksLikeMessageLengthTarget =
+                    MESSAGE_COMPOSER_SPECIFIC_GUARD_METHODS.some(
+                        (method) => typeof target[method] === "function",
+                    );
 
                 patchedGuardTargets.add(target);
 
@@ -1317,6 +1323,7 @@ export default {
                 }
 
                 for (const method of maxLengthMethods) {
+                    if (!looksLikeMessageLengthTarget) continue;
                     if (typeof target[method] !== "function") continue;
 
                     try {
@@ -1438,30 +1445,60 @@ export default {
             return copyText(content) ? "clipboard" : "failed";
         };
 
-        const restoreSendTextAfterAutoUpload = (
+        const restorePendingAutoTextSendTexts = (
             channelId: string,
-            content: string,
+            file: object,
+            sourceText?: string,
+            additionalText?: string,
         ) => {
-            const preserved = preserveSendTextForAutoUpload(channelId, content);
+            const pending = pendingAutoTextRestorations.get(file) ?? [];
+            const texts = pending.filter(
+                (text) =>
+                    sourceText === undefined ||
+                    !isSameGeneratedText(text, sourceText),
+            );
+            if (additionalText) texts.unshift(additionalText);
+            if (texts.length === 0) {
+                pendingAutoTextRestorations.delete(file);
+                return;
+            }
 
-            if (preserved === "draft") {
+            const currentDraft = getDraftText(channelId, DraftStore);
+            const isGeneratedSourceDraft =
+                currentDraft &&
+                sourceText !== undefined &&
+                isSameGeneratedText(currentDraft, sourceText);
+            const allTexts =
+                currentDraft &&
+                !isGeneratedSourceDraft &&
+                !texts.includes(currentDraft)
+                    ? [currentDraft, ...texts]
+                    : texts;
+            const restoredText = allTexts.join("\n\n");
+
+            if (saveDraftText(channelId, restoredText, DraftStore, DraftManager)) {
+                pendingAutoTextRestorations.delete(file);
                 showFailure(
-                    "SplitLargeMessages: text restored to the draft; send it again after the upload retry",
+                    allTexts.length === 1
+                        ? "SplitLargeMessages: text restored to the draft; send it again after the upload retry"
+                        : `SplitLargeMessages: ${allTexts.length} messages and draft text restored together; separate them before sending`,
                 );
                 return;
             }
 
-            if (preserved === "clipboard") {
+            if (copyText(restoredText)) {
+                pendingAutoTextRestorations.delete(file);
                 showFailure(
-                    "SplitLargeMessages: text copied to the clipboard after upload retry",
+                    allTexts.length === 1
+                        ? "SplitLargeMessages: text copied to the clipboard after upload retry"
+                        : `SplitLargeMessages: ${allTexts.length} messages and draft text copied together to the clipboard`,
                 );
                 return;
             }
 
-            if (preserved === "empty") return;
-
+            pendingAutoTextRestorations.set(file, texts);
             showFailure(
-                "SplitLargeMessages: could not restore the text after upload retry",
+                "SplitLargeMessages: could not restore every suppressed message",
             );
         };
 
@@ -1549,18 +1586,12 @@ export default {
                         );
 
                         if (content && !sourceAlreadySent) {
+                            const pendingRestorations =
+                                pendingAutoTextRestorations.get(file) ?? [];
+                            pendingRestorations.push(content);
                             pendingAutoTextRestorations.set(
                                 file,
-                                (sourceText) => {
-                                    if (isSameGeneratedText(content, sourceText)) {
-                                        return;
-                                    }
-
-                                    restoreSendTextAfterAutoUpload(
-                                        channelId,
-                                        content,
-                                    );
-                                },
+                                pendingRestorations,
                             );
                         }
 
@@ -1587,13 +1618,17 @@ export default {
                                 if (uploadState !== "processing") {
                                     pendingAutoTextFirstChunkSends.delete(file);
                                 }
-                                if (uploadState !== "processing") {
-                                    pendingAutoTextRestorations.delete(file);
-                                }
                                 if (!sourceAlreadySent) {
                                     preserveSendTextForAutoUpload(
                                         channelId,
                                         content,
+                                    );
+                                }
+                                if (uploadState !== "processing") {
+                                    restorePendingAutoTextSendTexts(
+                                        channelId,
+                                        file,
+                                        knownSourceText,
                                     );
                                 }
                                 showFailure(
@@ -1698,9 +1733,10 @@ export default {
                             (handled) => {
                                 if (handled) return;
 
-                                restoreSendTextAfterAutoUpload(
+                                restorePendingAutoTextSendTexts(
                                     channelId,
-                                    content,
+                                    file,
+                                    autoTextSourceTexts.get(file),
                                 );
                                 showFailure(
                                     "SplitLargeMessages: could not retry the generated message.txt upload",
@@ -1711,9 +1747,10 @@ export default {
                                     "[SplitLargeMessages] message.txt retry failed",
                                     error,
                                 );
-                                restoreSendTextAfterAutoUpload(
+                                restorePendingAutoTextSendTexts(
                                     channelId,
-                                    content,
+                                    file,
+                                    autoTextSourceTexts.get(file),
                                 );
                                 showFailure(
                                     "SplitLargeMessages: could not retry the generated message.txt upload",
