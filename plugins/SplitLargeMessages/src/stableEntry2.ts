@@ -12,6 +12,7 @@ const MESSAGE_LIMIT = 2000;
 const NITRO_MESSAGE_LIMIT = 4000;
 const MIN_SEND_DELAY_MS = 1000;
 const PATCH_SWEEP_INTERVAL_MS = 5000;
+const PATCH_SWEEP_MAX_ATTEMPTS = 6;
 
 let unpatchSend: (() => void) | undefined;
 let unpatchUpload: (() => void) | undefined;
@@ -23,6 +24,7 @@ const patchedLengthModules = new Map<Record<string, any>, Record<string, number>
 const patchedDialogTargets = new Set<object>();
 const patchedGuardTargets = new Set<object>();
 const channelQueues = new Map<string, Promise<void>>();
+const inFlightSendKeys = new Set<string>();
 const autoTextStates = new WeakMap<object, "processing" | "failed" | "done">();
 
 type MessageLocation = {
@@ -115,6 +117,32 @@ function getMessageLocation(args: any[]): MessageLocation {
     }
 
     return { index: 1, message: {} };
+}
+
+function getSendPayloadIdentity(message: any): string {
+    const reference = message?.message_reference ?? message?.messageReference;
+    const attachments = Array.isArray(message?.attachments)
+        ? message.attachments.map((attachment: any) => [
+              attachment?.id ?? null,
+              attachment?.filename ?? attachment?.name ?? null,
+              attachment?.url ?? null,
+          ])
+        : null;
+    const payload = [
+        reference?.message_id ?? reference?.messageId ?? reference?.id ?? null,
+        message?.allowed_mentions ?? message?.allowedMentions ?? null,
+        message?.embeds ?? null,
+        attachments,
+        message?.sticker_ids ?? message?.stickerIds ?? null,
+        message?.flags ?? null,
+        message?.tts ?? null,
+    ];
+
+    try {
+        return JSON.stringify(payload) ?? "";
+    } catch {
+        return "";
+    }
 }
 
 function extractContent(value: any, depth = 0, seen = new Set<any>()): string {
@@ -289,8 +317,11 @@ function copyText(text: string): boolean {
         findByProps("setString", "getString") ??
         (ReactNative as any).Clipboard;
 
+    const setString = Clipboard?.setString;
+    if (typeof setString !== "function") return false;
+
     try {
-        Clipboard?.setString?.(text);
+        setString.call(Clipboard, text);
         return true;
     } catch {
         return false;
@@ -689,17 +720,23 @@ export default {
             if (state === "processing" || state === "done") return true;
             if (state === "failed" && !forceRetry) return true;
 
+            autoTextStates.set(file, "processing");
+
             let text: string;
 
             try {
                 text = await file.text();
             } catch {
+                if (state === "failed") autoTextStates.set(file, "failed");
+                else autoTextStates.delete(file);
                 return false;
             }
 
-            if (!text || text.length <= getMaxLength()) return false;
-
-            autoTextStates.set(file, "processing");
+            if (!text || text.length <= getMaxLength()) {
+                if (state === "failed") autoTextStates.set(file, "failed");
+                else autoTextStates.delete(file);
+                return false;
+            }
 
             const split = splitContent(text);
 
@@ -786,7 +823,14 @@ export default {
             for (const upload of uploads) {
                 if (!isGeneratedLongMessageUpload(upload)) continue;
                 const file = getUploadFile(upload);
-                if (autoTextStates.get(file)) continue;
+                const state = autoTextStates.get(file);
+                if (
+                    state === "processing" ||
+                    state === "done" ||
+                    state === "failed"
+                ) {
+                    continue;
+                }
 
                 void processAutoTextFile(channelId, file).catch((error) => {
                     console.error(
@@ -800,6 +844,7 @@ export default {
         const patchTooLongGuardMethods = () => {
             const booleanMethods = [
                 "isMessageTooLong",
+                "isContentTooLong",
                 "shouldShowLargeMessageDialog",
                 "shouldShowMessageTooLongDialog",
             ] as const;
@@ -984,6 +1029,55 @@ export default {
                     sendArgs,
                 );
 
+                if (channelId && !content) {
+                    const failedUpload = getChannelUploads(
+                        channelId,
+                        UploadAttachmentStore,
+                    ).find((upload) => {
+                        const file = getUploadFile(upload);
+                        return (
+                            isGeneratedLongMessageUpload(upload) &&
+                            autoTextStates.get(file) === "failed"
+                        );
+                    });
+
+                    if (failedUpload) {
+                        const file = getUploadFile(failedUpload);
+                        const sendOriginal = () => {
+                            try {
+                                const result = orig(...sendArgs);
+                                if (result && typeof result.catch === "function") {
+                                    void result.catch((error: unknown) =>
+                                        console.error(
+                                            "[SplitLargeMessages] original retry send failed",
+                                            error,
+                                        ),
+                                    );
+                                }
+                            } catch (error) {
+                                console.error(
+                                    "[SplitLargeMessages] original retry send failed",
+                                    error,
+                                );
+                            }
+                        };
+
+                        void processAutoTextFile(channelId, file, true).then(
+                            (handled) => {
+                                if (!handled) sendOriginal();
+                            },
+                            (error) => {
+                                console.error(
+                                    "[SplitLargeMessages] message.txt retry failed",
+                                    error,
+                                );
+                                sendOriginal();
+                            },
+                        );
+                        return undefined;
+                    }
+                }
+
                 if (
                     !channelId ||
                     !content ||
@@ -1000,6 +1094,21 @@ export default {
                 }
 
                 const chunks = split.chunks;
+                const sendKey =
+                    JSON.stringify([
+                        channelId,
+                        content,
+                        getSendPayloadIdentity(message),
+                    ]) ?? "";
+                if (inFlightSendKeys.has(sendKey)) {
+                    showToast(
+                        "SplitLargeMessages: identical long message already queued",
+                        getAssetIDByName("Small"),
+                    );
+                    return undefined;
+                }
+
+                inFlightSendKeys.add(sendKey);
                 const wasQueued = channelQueues.has(channelId);
 
                 const queued = enqueueChannelTask(channelId, async () => {
@@ -1049,6 +1158,11 @@ export default {
                         throw error;
                     }
                 }, getSendDelay(channelId));
+
+                void queued.then(
+                    () => inFlightSendKeys.delete(sendKey),
+                    () => inFlightSendKeys.delete(sendKey),
+                );
 
                 if (wasQueued) {
                     showToast(
@@ -1113,8 +1227,14 @@ export default {
             );
         }
 
+        let patchSweepAttempts = 0;
+        let runtimeDiscoveryComplete = false;
+
         const onChannelSelect = () => {
-            setTimeout(patchRuntimeTargets, 250);
+            setTimeout(() => {
+                if (runtimeDiscoveryComplete) checkExistingAutoTextUploads();
+                else patchRuntimeTargets();
+            }, 250);
         };
 
         try {
@@ -1129,10 +1249,19 @@ export default {
 
         patchRuntimeTargets();
 
-        patchSweepInterval = setInterval(
-            patchRuntimeTargets,
-            PATCH_SWEEP_INTERVAL_MS,
-        );
+        patchSweepInterval = setInterval(() => {
+            patchRuntimeTargets();
+            patchSweepAttempts++;
+
+            if (
+                patchSweepAttempts >= PATCH_SWEEP_MAX_ATTEMPTS &&
+                patchSweepInterval
+            ) {
+                runtimeDiscoveryComplete = true;
+                clearInterval(patchSweepInterval);
+                patchSweepInterval = undefined;
+            }
+        }, PATCH_SWEEP_INTERVAL_MS);
 
         logDebug("Loaded reviewed split pipeline");
     },
@@ -1160,6 +1289,7 @@ export default {
         patchedDialogTargets.clear();
         patchedGuardTargets.clear();
         channelQueues.clear();
+        inFlightSendKeys.clear();
         restoreMessageLengthConstants();
     },
 

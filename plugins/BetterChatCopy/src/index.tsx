@@ -299,20 +299,20 @@ async function waitForStoreBatch(
     cursor: string,
     direction: CopyDirection,
     limit: number,
-    previousIds: Set<string>,
 ): Promise<any[]> {
     let latest = getStoreBatch(channelId, cursor, direction, limit);
+    let sawLoadingMore = getMessageCollection(channelId)?.loadingMore === true;
 
     for (let attempt = 0; attempt < FETCH_SETTLE_ATTEMPTS; attempt++) {
-        const hasNewMessage = latest.some(
-            (message) => message?.id && !previousIds.has(message.id),
-        );
         const collection = getMessageCollection(channelId);
 
-        if (hasNewMessage) return latest;
+        if (collection?.loadingMore === true) sawLoadingMore = true;
 
-        const hasKnownLoadingFlag = typeof collection?.loadingMore === "boolean";
-        if (hasKnownLoadingFlag && collection.loadingMore === false && attempt >= 4) {
+        if (
+            sawLoadingMore &&
+            collection?.loadingMore === false &&
+            attempt >= 4
+        ) {
             return latest;
         }
 
@@ -334,12 +334,6 @@ async function fetchBatch(
     }
 
     const cached = getStoreBatch(channelId, cursor, direction, limit);
-
-    const previousIds = new Set(
-        getMessagesArray(channelId)
-            .map((message) => message?.id)
-            .filter(Boolean),
-    );
 
     const args: any = { channelId, limit };
     args[direction === "up" ? "before" : "after"] = cursor;
@@ -369,7 +363,6 @@ async function fetchBatch(
         cursor,
         direction,
         limit,
-        previousIds,
     );
 }
 
