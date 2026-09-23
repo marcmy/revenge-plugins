@@ -31,6 +31,10 @@ const patchedGuardTargets = new Set<object>();
 const channelQueues = new Map<string, Promise<void>>();
 const inFlightSendKeys = new Set<string>();
 const autoTextStates = new WeakMap<object, "processing" | "failed" | "done">();
+const pendingAutoTextRestorations = new WeakMap<
+    object,
+    (sourceText: string) => void
+>();
 const localObjectIdentities = new WeakMap<object, number>();
 let nextLocalObjectIdentity = 0;
 
@@ -61,6 +65,13 @@ function getLocalObjectIdentity(value: any): number | null {
     }
 
     return identity;
+}
+
+function isSameGeneratedText(content: string, sourceText: string): boolean {
+    const normalize = (value: string) =>
+        value.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+
+    return normalize(content) === normalize(sourceText);
 }
 
 function logDebug(...args: any[]) {
@@ -753,7 +764,6 @@ export default {
             channelId: string,
             file: any,
             forceRetry = false,
-            onFirstSuccess?: () => void,
         ): Promise<boolean> => {
             if (!isAutoTextFile(file) || typeof file.text !== "function") {
                 return false;
@@ -773,12 +783,14 @@ export default {
             } catch {
                 if (state === "failed") autoTextStates.set(file, "failed");
                 else autoTextStates.delete(file);
+                pendingAutoTextRestorations.delete(file);
                 return false;
             }
 
             if (!text || text.length <= getMaxLength()) {
                 if (state === "failed") autoTextStates.set(file, "failed");
                 else autoTextStates.delete(file);
+                pendingAutoTextRestorations.delete(file);
                 return false;
             }
 
@@ -786,6 +798,7 @@ export default {
 
             if (split === false || split.chunks.length === 0) {
                 autoTextStates.set(file, "failed");
+                pendingAutoTextRestorations.delete(file);
                 showFailure();
                 return true;
             }
@@ -815,7 +828,10 @@ export default {
                             );
 
                             try {
-                                onFirstSuccess?.();
+                                const restorePendingText =
+                                    pendingAutoTextRestorations.get(file);
+                                pendingAutoTextRestorations.delete(file);
+                                restorePendingText?.(text);
                             } catch (error) {
                                 console.error(
                                     "[SplitLargeMessages] failed to restore text after upload retry",
@@ -830,6 +846,7 @@ export default {
                     }
 
                     autoTextStates.set(file, "done");
+                    pendingAutoTextRestorations.delete(file);
                 } catch (error) {
                     console.error(
                         "[SplitLargeMessages] message.txt split send failed",
@@ -838,6 +855,7 @@ export default {
 
                     if (sent === 0) {
                         autoTextStates.set(file, "failed");
+                        pendingAutoTextRestorations.delete(file);
                         showFailure(
                             "SplitLargeMessages: send failed; message.txt kept for retry",
                         );
@@ -853,6 +871,7 @@ export default {
                         DraftStore,
                         DraftManager,
                     );
+                    pendingAutoTextRestorations.delete(file);
                 }
             }, getSendDelay(channelId));
 
@@ -1148,6 +1167,24 @@ export default {
                         const file = getUploadFile(pendingRetryUpload);
                         const uploadState = autoTextStates.get(file);
 
+                        if (content) {
+                            pendingAutoTextRestorations.set(
+                                file,
+                                (sourceText) => {
+                                    if (isSameGeneratedText(content, sourceText)) {
+                                        return;
+                                    }
+
+                                    restoreSendTextAfterAutoUpload(
+                                        channelId,
+                                        content,
+                                    );
+                                },
+                            );
+                        } else {
+                            pendingAutoTextRestorations.delete(file);
+                        }
+
                         const preserved = preserveSendTextForAutoUpload(
                             channelId,
                             content,
@@ -1165,16 +1202,7 @@ export default {
 
                         if (uploadState === "processing") return undefined;
 
-                        void processAutoTextFile(
-                            channelId,
-                            file,
-                            true,
-                            () =>
-                                restoreSendTextAfterAutoUpload(
-                                    channelId,
-                                    content,
-                                ),
-                        ).then(
+                        void processAutoTextFile(channelId, file, true).then(
                             (handled) => {
                                 if (handled) return;
 
