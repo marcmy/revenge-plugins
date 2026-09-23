@@ -688,13 +688,35 @@ function patchMessageLengthConstants() {
         }
     };
 
+    const hasMessageLengthConstant = (value: any) => {
+        if (!value || typeof value !== "object") return false;
+
+        try {
+            const descriptors = Object.getOwnPropertyDescriptors(value);
+            return Object.entries(descriptors).some(([key, descriptor]) => {
+                if (!key.includes("MESSAGE_LENGTH")) return false;
+                if (!("value" in descriptor)) return false;
+                return (
+                    typeof descriptor.value === "number" &&
+                    descriptor.value > 0 &&
+                    descriptor.value <= 10000
+                );
+            });
+        } catch {
+            return false;
+        }
+    };
+
+    const isMessageLengthTarget = (value: any) =>
+        hasMessageComposerGuard(value) || hasMessageLengthConstant(value);
+
     const modules = findAll((module) => {
         try {
             return (
                 module &&
                 typeof module === "object" &&
-                (hasMessageComposerGuard(module) ||
-                    safeObjectValues(module).some(hasMessageComposerGuard))
+                (isMessageLengthTarget(module) ||
+                    safeObjectValues(module).some(isMessageLengthTarget))
             );
         } catch {
             return false;
@@ -703,13 +725,11 @@ function patchMessageLengthConstants() {
 
     for (const module of modules) {
         const values = safeObjectValues(module);
-        const moduleHasGuard = hasMessageComposerGuard(module);
-        const nestedValuesHaveGuard = values.some(hasMessageComposerGuard);
 
-        if (moduleHasGuard || nestedValuesHaveGuard) patchTarget(module);
+        if (isMessageLengthTarget(module)) patchTarget(module);
 
         for (const value of values) {
-            if (hasMessageComposerGuard(value)) patchTarget(value);
+            if (isMessageLengthTarget(value)) patchTarget(value);
         }
     }
 }
