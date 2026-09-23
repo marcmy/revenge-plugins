@@ -38,6 +38,7 @@ const runtimeUnpatches: Array<() => void> = [];
 const channelDiscoveryTimeouts = new Set<ReturnType<typeof setTimeout>>();
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
 const patchedDialogTargets = new Set<object>();
+const patchedComposerTargets = new Set<object>();
 const patchedGuardTargets = new Set<object>();
 const channelQueues = new Map<string, Promise<void>>();
 const inFlightSendKeys = new Set<string>();
@@ -1276,6 +1277,92 @@ export default {
             }
         };
 
+        const patchComposerSendTargets = () => {
+            const targets = collectTargetsWithMethods(["handleSendMessage"]);
+            let patchedCount = 0;
+
+            for (const target of targets) {
+                if (patchedComposerTargets.has(target)) continue;
+                if (typeof target.handleSendMessage !== "function") continue;
+
+                try {
+                    runtimeUnpatches.push(
+                        instead(
+                            "handleSendMessage",
+                            target,
+                            (args: any[], orig: (...callArgs: any[]) => any) => {
+                                const channelId =
+                                    resolveChannelIdFromObjects(
+                                        SelectedChannelStore,
+                                        ...args,
+                                    ) ??
+                                    SelectedChannelStore?.getChannelId?.();
+
+                                if (!isSnowflakeLike(channelId)) {
+                                    return orig(...args);
+                                }
+
+                                const direct = getLongestContent(args);
+                                const draft = getDraftText(
+                                    channelId,
+                                    DraftStore,
+                                );
+                                const content =
+                                    direct.length >= draft.length
+                                        ? direct
+                                        : draft;
+
+                                if (
+                                    !content ||
+                                    content.length <= getMaxLength()
+                                ) {
+                                    return orig(...args);
+                                }
+
+                                // The composer rejects oversized messages before
+                                // MessageActions.sendMessage is reached on some
+                                // Discord builds. Intercept that early guard, but
+                                // do not take over when staged uploads could be lost.
+                                const uploads = getChannelUploads(
+                                    channelId,
+                                    UploadAttachmentStore,
+                                );
+                                if (uploads.length > 0) {
+                                    return orig(...args);
+                                }
+
+                                const template = findMessagePayload(args);
+
+                                void runStandaloneSplit(
+                                    channelId,
+                                    content,
+                                    "handleSendMessage",
+                                    template,
+                                    () =>
+                                        clearDraftAndUploads(
+                                            channelId,
+                                            DraftManager,
+                                            UploadManager,
+                                        ),
+                                ).catch(() => {});
+
+                                return undefined;
+                            },
+                        ),
+                    );
+                    patchedComposerTargets.add(target);
+                    patchedCount++;
+                } catch {}
+            }
+
+            if (patchedCount > 0) {
+                logDebug(
+                    "Patched composer handleSendMessage targets",
+                    patchedCount,
+                );
+            }
+        };
+
         const patchTooLongGuardMethods = () => {
             const booleanMethods = MESSAGE_COMPOSER_GUARD_METHODS;
 
@@ -1447,6 +1534,7 @@ export default {
             if (unloaded) return;
 
             patchMessageLengthConstants();
+            patchComposerSendTargets();
             patchTooLongGuardMethods();
             patchLargeMessageDialogs();
             checkExistingAutoTextUploads();
@@ -2005,6 +2093,7 @@ export default {
         }
 
         patchedDialogTargets.clear();
+        patchedComposerTargets.clear();
         patchedGuardTargets.clear();
         channelQueues.clear();
         inFlightSendKeys.clear();
