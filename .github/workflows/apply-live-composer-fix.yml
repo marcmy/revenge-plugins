@@ -20,6 +20,7 @@ jobs:
       - name: Apply live composer patch
         shell: bash
         run: |
+          printf '\n' >> .github/reviewfix/live-composer.patch
           git apply .github/reviewfix/live-composer.patch
           rm -rf .github/reviewfix .github/workflows/apply-live-composer-fix.yml
           git config user.name "github-actions[bot]"
