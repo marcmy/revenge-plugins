@@ -13,24 +13,55 @@ const NITRO_MESSAGE_LIMIT = 4000;
 const MIN_SEND_DELAY_MS = 1000;
 const PATCH_SWEEP_INTERVAL_MS = 5000;
 const PATCH_SWEEP_MAX_ATTEMPTS = 6;
+const CHANNEL_DISCOVERY_INITIAL_DELAY_MS = 250;
+const CHANNEL_DISCOVERY_RETRY_INTERVAL_MS = 500;
+const CHANNEL_DISCOVERY_MAX_ATTEMPTS = 3;
 
 let unpatchSend: (() => void) | undefined;
 let unpatchUpload: (() => void) | undefined;
 let patchSweepInterval: ReturnType<typeof setInterval> | undefined;
 let unloaded = false;
+let lifecycleGeneration = 0;
 
 const runtimeUnpatches: Array<() => void> = [];
+const channelDiscoveryTimeouts = new Set<ReturnType<typeof setTimeout>>();
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
 const patchedDialogTargets = new Set<object>();
 const patchedGuardTargets = new Set<object>();
 const channelQueues = new Map<string, Promise<void>>();
 const inFlightSendKeys = new Set<string>();
 const autoTextStates = new WeakMap<object, "processing" | "failed" | "done">();
+const localObjectIdentities = new WeakMap<object, number>();
+let nextLocalObjectIdentity = 0;
+
+function clearChannelDiscoveryTimeouts() {
+    for (const timeout of channelDiscoveryTimeouts) clearTimeout(timeout);
+    channelDiscoveryTimeouts.clear();
+}
 
 type MessageLocation = {
     index: number;
     message: Record<string, any>;
 };
+
+function getLocalObjectIdentity(value: any): number | null {
+    if (
+        value == null ||
+        (typeof value !== "object" && typeof value !== "function")
+    ) {
+        return null;
+    }
+
+    const object = value as object;
+    let identity = localObjectIdentities.get(object);
+
+    if (identity == null) {
+        identity = ++nextLocalObjectIdentity;
+        localObjectIdentities.set(object, identity);
+    }
+
+    return identity;
+}
 
 function logDebug(...args: any[]) {
     try {
@@ -122,11 +153,21 @@ function getMessageLocation(args: any[]): MessageLocation {
 function getSendPayloadIdentity(message: any): string {
     const reference = message?.message_reference ?? message?.messageReference;
     const attachments = Array.isArray(message?.attachments)
-        ? message.attachments.map((attachment: any) => [
-              attachment?.id ?? null,
-              attachment?.filename ?? attachment?.name ?? null,
-              attachment?.url ?? null,
-          ])
+        ? message.attachments.map((attachment: any) => {
+              const localIdentity =
+                  getLocalObjectIdentity(attachment?.file) ??
+                  getLocalObjectIdentity(attachment?.nativeFile) ??
+                  getLocalObjectIdentity(attachment?.blob) ??
+                  getLocalObjectIdentity(attachment?.fileData) ??
+                  getLocalObjectIdentity(attachment);
+
+              return [
+                  localIdentity,
+                  attachment?.id ?? null,
+                  attachment?.filename ?? attachment?.name ?? null,
+                  attachment?.url ?? null,
+              ];
+          })
         : null;
     const payload = [
         reference?.message_id ?? reference?.messageId ?? reference?.id ?? null,
@@ -585,6 +626,8 @@ function restoreMessageLengthConstants() {
 export default {
     onLoad() {
         unloaded = false;
+        clearChannelDiscoveryTimeouts();
+        const loadGeneration = ++lifecycleGeneration;
         storage.splitOnWords ??= false;
 
         const ChannelStore = findByStoreName("ChannelStore");
@@ -710,6 +753,7 @@ export default {
             channelId: string,
             file: any,
             forceRetry = false,
+            onFirstSuccess?: () => void,
         ): Promise<boolean> => {
             if (!isAutoTextFile(file) || typeof file.text !== "function") {
                 return false;
@@ -769,6 +813,15 @@ export default {
                                 DraftManager,
                                 UploadManager,
                             );
+
+                            try {
+                                onFirstSuccess?.();
+                            } catch (error) {
+                                console.error(
+                                    "[SplitLargeMessages] failed to restore text after upload retry",
+                                    error,
+                                );
+                            }
                         }
 
                         if (index < chunks.length - 1) {
@@ -815,6 +868,8 @@ export default {
         };
 
         const checkExistingAutoTextUploads = () => {
+            if (unloaded) return;
+
             const channelId = SelectedChannelStore?.getChannelId?.();
             if (!isSnowflakeLike(channelId)) return;
 
@@ -1005,6 +1060,8 @@ export default {
             }
         };
 
+        let patchSweepAttempts = 0;
+
         const patchRuntimeTargets = () => {
             if (unloaded) return;
 
@@ -1012,6 +1069,46 @@ export default {
             patchTooLongGuardMethods();
             patchLargeMessageDialogs();
             checkExistingAutoTextUploads();
+        };
+
+        const preserveSendTextForAutoUpload = (
+            channelId: string,
+            content: string,
+        ): "draft" | "clipboard" | "failed" | "empty" => {
+            if (!content) return "empty";
+
+            if (saveDraftText(channelId, content, DraftStore, DraftManager)) {
+                return "draft";
+            }
+
+            return copyText(content) ? "clipboard" : "failed";
+        };
+
+        const restoreSendTextAfterAutoUpload = (
+            channelId: string,
+            content: string,
+        ) => {
+            const preserved = preserveSendTextForAutoUpload(channelId, content);
+
+            if (preserved === "draft") {
+                showFailure(
+                    "SplitLargeMessages: text restored to the draft; send it again after the upload retry",
+                );
+                return;
+            }
+
+            if (preserved === "clipboard") {
+                showFailure(
+                    "SplitLargeMessages: text copied to the clipboard after upload retry",
+                );
+                return;
+            }
+
+            if (preserved === "empty") return;
+
+            showFailure(
+                "SplitLargeMessages: could not restore the text after upload retry",
+            );
         };
 
         unpatchSend?.();
@@ -1029,49 +1126,78 @@ export default {
                     sendArgs,
                 );
 
-                if (channelId && !content) {
-                    const failedUpload = getChannelUploads(
+                if (channelId) {
+                    const retryUploads = getChannelUploads(
                         channelId,
                         UploadAttachmentStore,
-                    ).find((upload) => {
-                        const file = getUploadFile(upload);
-                        return (
-                            isGeneratedLongMessageUpload(upload) &&
-                            autoTextStates.get(file) === "failed"
+                    ).filter(isGeneratedLongMessageUpload);
+                    const processingUpload = retryUploads.find(
+                        (upload) =>
+                            autoTextStates.get(getUploadFile(upload)) ===
+                            "processing",
+                    );
+                    const pendingRetryUpload =
+                        processingUpload ??
+                        retryUploads.find(
+                            (upload) =>
+                                autoTextStates.get(getUploadFile(upload)) ===
+                                "failed",
                         );
-                    });
 
-                    if (failedUpload) {
-                        const file = getUploadFile(failedUpload);
-                        const sendOriginal = () => {
-                            try {
-                                const result = orig(...sendArgs);
-                                if (result && typeof result.catch === "function") {
-                                    void result.catch((error: unknown) =>
-                                        console.error(
-                                            "[SplitLargeMessages] original retry send failed",
-                                            error,
-                                        ),
-                                    );
-                                }
-                            } catch (error) {
-                                console.error(
-                                    "[SplitLargeMessages] original retry send failed",
-                                    error,
-                                );
-                            }
-                        };
+                    if (pendingRetryUpload) {
+                        const file = getUploadFile(pendingRetryUpload);
+                        const uploadState = autoTextStates.get(file);
 
-                        void processAutoTextFile(channelId, file, true).then(
+                        const preserved = preserveSendTextForAutoUpload(
+                            channelId,
+                            content,
+                        );
+
+                        if (preserved === "clipboard") {
+                            showFailure(
+                                "SplitLargeMessages: text copied to the clipboard while the upload retry runs",
+                            );
+                        } else if (preserved === "failed") {
+                            showFailure(
+                                "SplitLargeMessages: could not preserve the text while retrying the upload",
+                            );
+                        }
+
+                        if (uploadState === "processing") return undefined;
+
+                        void processAutoTextFile(
+                            channelId,
+                            file,
+                            true,
+                            () =>
+                                restoreSendTextAfterAutoUpload(
+                                    channelId,
+                                    content,
+                                ),
+                        ).then(
                             (handled) => {
-                                if (!handled) sendOriginal();
+                                if (handled) return;
+
+                                restoreSendTextAfterAutoUpload(
+                                    channelId,
+                                    content,
+                                );
+                                showFailure(
+                                    "SplitLargeMessages: could not retry the generated message.txt upload",
+                                );
                             },
                             (error) => {
                                 console.error(
                                     "[SplitLargeMessages] message.txt retry failed",
                                     error,
                                 );
-                                sendOriginal();
+                                restoreSendTextAfterAutoUpload(
+                                    channelId,
+                                    content,
+                                );
+                                showFailure(
+                                    "SplitLargeMessages: could not retry the generated message.txt upload",
+                                );
                             },
                         );
                         return undefined;
@@ -1227,14 +1353,29 @@ export default {
             );
         }
 
-        let patchSweepAttempts = 0;
-        let runtimeDiscoveryComplete = false;
-
         const onChannelSelect = () => {
-            setTimeout(() => {
-                if (runtimeDiscoveryComplete) checkExistingAutoTextUploads();
-                else patchRuntimeTargets();
-            }, 250);
+            clearChannelDiscoveryTimeouts();
+
+            const scheduleDiscoveryAttempt = (attempt: number) => {
+                let timeout: ReturnType<typeof setTimeout>;
+                timeout = setTimeout(() => {
+                    channelDiscoveryTimeouts.delete(timeout);
+                    if (unloaded || loadGeneration !== lifecycleGeneration) return;
+
+                    patchRuntimeTargets();
+
+                    if (attempt + 1 < CHANNEL_DISCOVERY_MAX_ATTEMPTS) {
+                        scheduleDiscoveryAttempt(attempt + 1);
+                    }
+                },
+                    attempt === 0
+                        ? CHANNEL_DISCOVERY_INITIAL_DELAY_MS
+                        : CHANNEL_DISCOVERY_RETRY_INTERVAL_MS,
+                );
+                channelDiscoveryTimeouts.add(timeout);
+            };
+
+            scheduleDiscoveryAttempt(0);
         };
 
         try {
@@ -1257,7 +1398,6 @@ export default {
                 patchSweepAttempts >= PATCH_SWEEP_MAX_ATTEMPTS &&
                 patchSweepInterval
             ) {
-                runtimeDiscoveryComplete = true;
                 clearInterval(patchSweepInterval);
                 patchSweepInterval = undefined;
             }
@@ -1268,6 +1408,8 @@ export default {
 
     onUnload() {
         unloaded = true;
+        lifecycleGeneration++;
+        clearChannelDiscoveryTimeouts();
 
         unpatchUpload?.();
         unpatchUpload = undefined;

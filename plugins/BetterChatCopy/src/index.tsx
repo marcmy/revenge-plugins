@@ -299,6 +299,7 @@ async function waitForStoreBatch(
     cursor: string,
     direction: CopyDirection,
     limit: number,
+    requestSettled = false,
 ): Promise<any[]> {
     let latest = getStoreBatch(channelId, cursor, direction, limit);
     let sawLoadingMore = getMessageCollection(channelId)?.loadingMore === true;
@@ -307,6 +308,10 @@ async function waitForStoreBatch(
         const collection = getMessageCollection(channelId);
 
         if (collection?.loadingMore === true) sawLoadingMore = true;
+
+        if (requestSettled && collection?.loadingMore !== true) {
+            return latest;
+        }
 
         if (
             sawLoadingMore &&
@@ -339,8 +344,11 @@ async function fetchBatch(
     args[direction === "up" ? "before" : "after"] = cursor;
 
     let result = MessageActions.fetchMessages(args);
+    let requestSettled = false;
+
     if (result && typeof result.then === "function") {
         result = await result;
+        requestSettled = true;
     }
 
     const direct = extractMessages(result);
@@ -363,6 +371,7 @@ async function fetchBatch(
         cursor,
         direction,
         limit,
+        requestSettled,
     );
 }
 
