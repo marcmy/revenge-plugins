@@ -31,12 +31,34 @@ const patchedGuardTargets = new Set<object>();
 const channelQueues = new Map<string, Promise<void>>();
 const inFlightSendKeys = new Set<string>();
 const autoTextStates = new WeakMap<object, "processing" | "failed" | "done">();
+const autoTextProcessingGenerations = new WeakMap<object, number>();
+const autoTextSourceTexts = new WeakMap<object, string>();
+const autoTextFirstChunkSent = new WeakSet<object>();
 const pendingAutoTextRestorations = new WeakMap<
     object,
     (sourceText: string) => void
 >();
+const pendingAutoTextFirstChunkSends = new WeakMap<
+    object,
+    PendingAutoTextSends
+>();
+const autoTextFirstChunkStarted = new WeakSet<object>();
 const localObjectIdentities = new WeakMap<object, number>();
 let nextLocalObjectIdentity = 0;
+
+type PendingAutoTextAttachmentSend = {
+    uploads: any[];
+    send: (
+        content: string,
+        includeContent: boolean,
+        excludeUploads: any[],
+    ) => Promise<boolean>;
+};
+
+type PendingAutoTextSends = {
+    first?: PendingAutoTextAttachmentSend;
+    trailing: PendingAutoTextAttachmentSend[];
+};
 
 function clearChannelDiscoveryTimeouts() {
     for (const timeout of channelDiscoveryTimeouts) clearTimeout(timeout);
@@ -526,6 +548,50 @@ function getUploadFile(upload: any): any {
     return upload?.item?.file ?? upload?.file;
 }
 
+function isGeneratedFileAttachment(
+    attachment: any,
+    file: any,
+    upload: any,
+): boolean {
+    const localFile =
+        attachment?.file ??
+        attachment?.nativeFile ??
+        attachment?.blob ??
+        attachment?.fileData ??
+        attachment?.item?.file;
+    if (attachment === file || localFile === file) return true;
+
+    const uploadId = upload?.id ?? upload?.item?.id;
+    const attachmentId =
+        attachment?.id ?? attachment?.uploadId ?? attachment?.item?.id;
+    return (
+        isGeneratedLongMessageUpload(attachment) ||
+        (uploadId != null &&
+            attachmentId != null &&
+            String(uploadId) === String(attachmentId))
+    );
+}
+
+function attachmentMatchesUpload(attachment: any, upload: any): boolean {
+    const file = getUploadFile(upload);
+    const attachmentFile =
+        attachment?.file ??
+        attachment?.nativeFile ??
+        attachment?.blob ??
+        attachment?.fileData ??
+        attachment?.item?.file;
+    if (file && (attachment === file || attachmentFile === file)) return true;
+
+    const uploadId = upload?.id ?? upload?.item?.id;
+    const attachmentId =
+        attachment?.id ?? attachment?.uploadId ?? attachment?.item?.id;
+    return (
+        uploadId != null &&
+        attachmentId != null &&
+        String(uploadId) === String(attachmentId)
+    );
+}
+
 function isGeneratedLongMessageUpload(upload: any): boolean {
     const file = getUploadFile(upload);
     return (
@@ -646,6 +712,10 @@ export default {
         const UserStore = findByStoreName("UserStore");
         const MessageActions = findByProps("sendMessage", "editMessage");
         const UploadHandler = findByProps("promptToUpload");
+        const originalPromptToUpload =
+            typeof UploadHandler?.promptToUpload === "function"
+                ? UploadHandler.promptToUpload.bind(UploadHandler)
+                : undefined;
         const UploadAttachmentStore = findByProps("getUploads");
         const DraftStore = findByProps("getDraft");
         const DraftManager = findByProps("clearDraft", "saveDraft");
@@ -689,6 +759,26 @@ export default {
             return typeof sourceStart === "number"
                 ? split.normalized.slice(sourceStart)
                 : split.normalized;
+        };
+
+        const getAutoTextState = (file: any) => {
+            const state = autoTextStates.get(file);
+
+            if (
+                state !== "processing" ||
+                autoTextProcessingGenerations.get(file) === loadGeneration
+            ) {
+                return state;
+            }
+
+            autoTextStates.delete(file);
+            autoTextProcessingGenerations.delete(file);
+            autoTextSourceTexts.delete(file);
+            autoTextFirstChunkSent.delete(file);
+            autoTextFirstChunkStarted.delete(file);
+            pendingAutoTextRestorations.delete(file);
+            pendingAutoTextFirstChunkSends.delete(file);
+            return undefined;
         };
 
         const runStandaloneSplit = (
@@ -764,17 +854,31 @@ export default {
             channelId: string,
             file: any,
             forceRetry = false,
+            allowOtherUploads = false,
         ): Promise<boolean> => {
             if (!isAutoTextFile(file) || typeof file.text !== "function") {
                 return false;
             }
 
-            const state = autoTextStates.get(file);
+            const state = getAutoTextState(file);
 
             if (state === "processing" || state === "done") return true;
             if (state === "failed" && !forceRetry) return true;
 
+            const getOtherUploads = () =>
+                getChannelUploads(channelId, UploadAttachmentStore).filter(
+                    (upload) => getUploadFile(upload) !== file,
+                );
+
+            if (!allowOtherUploads && getOtherUploads().length > 0) {
+                autoTextStates.set(file, "failed");
+                return false;
+            }
+
+            autoTextFirstChunkSent.delete(file);
+            autoTextFirstChunkStarted.delete(file);
             autoTextStates.set(file, "processing");
+            autoTextProcessingGenerations.set(file, loadGeneration);
 
             let text: string;
 
@@ -783,14 +887,36 @@ export default {
             } catch {
                 if (state === "failed") autoTextStates.set(file, "failed");
                 else autoTextStates.delete(file);
+                autoTextProcessingGenerations.delete(file);
+                autoTextSourceTexts.delete(file);
                 pendingAutoTextRestorations.delete(file);
+                pendingAutoTextFirstChunkSends.delete(file);
                 return false;
             }
+
+            if (unloaded || loadGeneration !== lifecycleGeneration) {
+                if (autoTextProcessingGenerations.get(file) !== loadGeneration) {
+                    return true;
+                }
+
+                if (state === "failed") autoTextStates.set(file, "failed");
+                else autoTextStates.delete(file);
+                autoTextProcessingGenerations.delete(file);
+                autoTextSourceTexts.delete(file);
+                pendingAutoTextRestorations.delete(file);
+                pendingAutoTextFirstChunkSends.delete(file);
+                return false;
+            }
+
+            autoTextSourceTexts.set(file, text);
 
             if (!text || text.length <= getMaxLength()) {
                 if (state === "failed") autoTextStates.set(file, "failed");
                 else autoTextStates.delete(file);
+                autoTextProcessingGenerations.delete(file);
+                autoTextSourceTexts.delete(file);
                 pendingAutoTextRestorations.delete(file);
+                pendingAutoTextFirstChunkSends.delete(file);
                 return false;
             }
 
@@ -798,9 +924,11 @@ export default {
 
             if (split === false || split.chunks.length === 0) {
                 autoTextStates.set(file, "failed");
+                autoTextProcessingGenerations.delete(file);
                 pendingAutoTextRestorations.delete(file);
+                pendingAutoTextFirstChunkSends.delete(file);
                 showFailure();
-                return true;
+                return false;
             }
 
             const chunks = split.chunks;
@@ -809,23 +937,174 @@ export default {
             const queued = enqueueChannelTask(channelId, async () => {
                 let sent = 0;
 
+                if (unloaded || loadGeneration !== lifecycleGeneration) {
+                    if (
+                        autoTextProcessingGenerations.get(file) ===
+                        loadGeneration
+                    ) {
+                        if (state === "failed") {
+                            autoTextStates.set(file, "failed");
+                        } else {
+                            autoTextStates.delete(file);
+                        }
+                        autoTextProcessingGenerations.delete(file);
+                        pendingAutoTextRestorations.delete(file);
+                        pendingAutoTextFirstChunkSends.delete(file);
+
+                        const restaged = await stageAutoTextFileForRetry(
+                            channelId,
+                            file,
+                        );
+                        if (!restaged) {
+                            restoreUnsentContent(
+                                channelId,
+                                split.normalized,
+                                DraftStore,
+                                DraftManager,
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                if (
+                    getOtherUploads().length > 0 &&
+                    !pendingAutoTextFirstChunkSends.has(file)
+                ) {
+                    autoTextStates.set(file, "failed");
+                    autoTextProcessingGenerations.delete(file);
+                    pendingAutoTextRestorations.delete(file);
+                    pendingAutoTextFirstChunkSends.delete(file);
+                    const restaged = await stageAutoTextFileForRetry(
+                        channelId,
+                        file,
+                    );
+                    if (!restaged) {
+                        restoreUnsentContent(
+                            channelId,
+                            split.normalized,
+                            DraftStore,
+                            DraftManager,
+                        );
+                    }
+                    showFailure(
+                        "SplitLargeMessages: other attachments are still staged; retry the generated text with them or remove them first",
+                    );
+                    return;
+                }
+
                 try {
                     for (let index = 0; index < chunks.length; index++) {
-                        await originalSendMessage(channelId, {
-                            content: chunks[index],
-                            tts: false,
-                            invalidEmojis: [],
-                            validNonShortcutEmojis: [],
-                        });
+                        const pendingSends =
+                            index === 0
+                                ? pendingAutoTextFirstChunkSends.get(file)
+                                : undefined;
+                        const sendFirstChunk = pendingSends?.first;
+
+                        if (index === 0) autoTextFirstChunkStarted.add(file);
+
+                        if (sendFirstChunk) {
+                            await sendFirstChunk.send(
+                                chunks[index],
+                                true,
+                                [],
+                            );
+                        } else {
+                            await originalSendMessage(channelId, {
+                                content: chunks[index],
+                                tts: false,
+                                invalidEmojis: [],
+                                validNonShortcutEmojis: [],
+                            });
+                        }
 
                         sent++;
 
                         if (sent === 1) {
+                            autoTextFirstChunkSent.add(file);
+
+                            const successfullySentUploads = [
+                                ...(sendFirstChunk?.uploads ?? []),
+                            ];
+                            let trailingIndex = 0;
+
+                            while (true) {
+                                const currentSends =
+                                    pendingAutoTextFirstChunkSends.get(file);
+                                const trailingSend =
+                                    currentSends?.trailing[trailingIndex++];
+                                if (!trailingSend) break;
+
+                                try {
+                                    const didSend = await trailingSend.send(
+                                        "",
+                                        false,
+                                        successfullySentUploads,
+                                    );
+                                    if (!didSend) continue;
+                                    for (const upload of trailingSend.uploads) {
+                                        if (
+                                            !successfullySentUploads.some(
+                                                (sentUpload) =>
+                                                    getUploadFile(sentUpload) ===
+                                                    getUploadFile(upload),
+                                            )
+                                        ) {
+                                            successfullySentUploads.push(upload);
+                                        }
+                                    }
+                                } catch (error) {
+                                    console.error(
+                                        "[SplitLargeMessages] failed to send other staged attachments",
+                                        error,
+                                    );
+                                }
+                            }
+
+                            const sentUploadFiles = new Set(
+                                successfullySentUploads.map(getUploadFile),
+                            );
+                            const uploadsToRestage = getOtherUploads().filter(
+                                (upload) =>
+                                    !sentUploadFiles.has(getUploadFile(upload)),
+                            );
+                            pendingAutoTextFirstChunkSends.delete(file);
                             clearDraftAndUploads(
                                 channelId,
                                 DraftManager,
                                 UploadManager,
                             );
+
+                            let attachmentsRestaged = false;
+                            let attachmentRestoreFailed = false;
+                            for (const upload of uploadsToRestage) {
+                                const uploadFile = getUploadFile(upload);
+                                if (!uploadFile) {
+                                    attachmentRestoreFailed = true;
+                                    continue;
+                                }
+
+                                if (
+                                    await stageAutoTextFileForRetry(
+                                        channelId,
+                                        uploadFile,
+                                    )
+                                ) {
+                                    attachmentsRestaged = true;
+                                } else {
+                                    attachmentRestoreFailed = true;
+                                }
+                            }
+                            if (attachmentsRestaged) {
+                                showFailure(
+                                    "SplitLargeMessages: other attachments remain staged; send them separately",
+                                );
+                            }
+                            if (attachmentRestoreFailed) {
+                                showFailure(
+                                    "SplitLargeMessages: could not restore every other attachment after the text send",
+                                );
+                            }
 
                             try {
                                 const restorePendingText =
@@ -846,7 +1125,9 @@ export default {
                     }
 
                     autoTextStates.set(file, "done");
+                    autoTextProcessingGenerations.delete(file);
                     pendingAutoTextRestorations.delete(file);
+                    pendingAutoTextFirstChunkSends.delete(file);
                 } catch (error) {
                     console.error(
                         "[SplitLargeMessages] message.txt split send failed",
@@ -855,14 +1136,31 @@ export default {
 
                     if (sent === 0) {
                         autoTextStates.set(file, "failed");
+                        autoTextProcessingGenerations.delete(file);
                         pendingAutoTextRestorations.delete(file);
+                        pendingAutoTextFirstChunkSends.delete(file);
+                        const restaged = await stageAutoTextFileForRetry(
+                            channelId,
+                            file,
+                        );
+                        if (!restaged) {
+                            restoreUnsentContent(
+                                channelId,
+                                split.normalized,
+                                DraftStore,
+                                DraftManager,
+                            );
+                        }
                         showFailure(
-                            "SplitLargeMessages: send failed; message.txt kept for retry",
+                            restaged
+                                ? "SplitLargeMessages: send failed; message.txt kept for retry"
+                                : "SplitLargeMessages: send failed; original text restored for retry",
                         );
                         return;
                     }
 
                     autoTextStates.set(file, "done");
+                    autoTextProcessingGenerations.delete(file);
 
                     const unsent = getUnsentSource(split, sent);
                     restoreUnsentContent(
@@ -872,6 +1170,7 @@ export default {
                         DraftManager,
                     );
                     pendingAutoTextRestorations.delete(file);
+                    pendingAutoTextFirstChunkSends.delete(file);
                 }
             }, getSendDelay(channelId));
 
@@ -882,7 +1181,43 @@ export default {
                 );
             }
 
-            void queued.catch(() => {});
+            void queued.then(
+                async () => {
+                    if (
+                        autoTextStates.get(file) !== "processing" ||
+                        autoTextProcessingGenerations.get(file) !==
+                            loadGeneration ||
+                        (!unloaded && loadGeneration === lifecycleGeneration)
+                    ) {
+                        return;
+                    }
+
+                    if (state === "failed") autoTextStates.set(file, "failed");
+                    else autoTextStates.delete(file);
+                    autoTextProcessingGenerations.delete(file);
+                    pendingAutoTextRestorations.delete(file);
+                    pendingAutoTextFirstChunkSends.delete(file);
+
+                    const restaged = await stageAutoTextFileForRetry(
+                        channelId,
+                        file,
+                    );
+                    if (!restaged) {
+                        restoreUnsentContent(
+                            channelId,
+                            split.normalized,
+                            DraftStore,
+                            DraftManager,
+                        );
+                    }
+                },
+                (error) => {
+                    console.error(
+                        "[SplitLargeMessages] generated upload queue failed",
+                        error,
+                    );
+                },
+            );
             return true;
         };
 
@@ -897,7 +1232,7 @@ export default {
             for (const upload of uploads) {
                 if (!isGeneratedLongMessageUpload(upload)) continue;
                 const file = getUploadFile(upload);
-                const state = autoTextStates.get(file);
+                const state = getAutoTextState(file);
                 if (
                     state === "processing" ||
                     state === "done" ||
@@ -1130,6 +1465,39 @@ export default {
             );
         };
 
+        const stageAutoTextFileForRetry = async (
+            channelId: string,
+            file: any,
+        ): Promise<boolean> => {
+            if (
+                getChannelUploads(channelId, UploadAttachmentStore).some(
+                    (upload) => getUploadFile(upload) === file,
+                )
+            ) {
+                return true;
+            }
+
+            if (!originalPromptToUpload) return false;
+
+            try {
+                const result = originalPromptToUpload(
+                    [file],
+                    ChannelStore?.getChannel?.(channelId),
+                    0,
+                );
+                if (result && typeof result.then === "function") {
+                    await result;
+                }
+                return true;
+            } catch (error) {
+                console.error(
+                    "[SplitLargeMessages] failed to restore generated upload for retry",
+                    error,
+                );
+                return false;
+            }
+        };
+
         unpatchSend?.();
         unpatchUpload?.();
 
@@ -1146,28 +1514,41 @@ export default {
                 );
 
                 if (channelId) {
-                    const retryUploads = getChannelUploads(
+                    const stagedUploads = getChannelUploads(
                         channelId,
                         UploadAttachmentStore,
-                    ).filter(isGeneratedLongMessageUpload);
+                    );
+                    const retryUploads = stagedUploads.filter(
+                        isGeneratedLongMessageUpload,
+                    );
                     const processingUpload = retryUploads.find(
                         (upload) =>
-                            autoTextStates.get(getUploadFile(upload)) ===
+                            getAutoTextState(getUploadFile(upload)) ===
                             "processing",
                     );
                     const pendingRetryUpload =
                         processingUpload ??
                         retryUploads.find(
                             (upload) =>
-                                autoTextStates.get(getUploadFile(upload)) ===
+                                getAutoTextState(getUploadFile(upload)) ===
                                 "failed",
                         );
 
                     if (pendingRetryUpload) {
                         const file = getUploadFile(pendingRetryUpload);
-                        const uploadState = autoTextStates.get(file);
+                        const uploadState = getAutoTextState(file);
+                        const knownSourceText = autoTextSourceTexts.get(file);
+                        const sourceAlreadySent =
+                            uploadState === "processing" &&
+                            autoTextFirstChunkSent.has(file) &&
+                            Boolean(content) &&
+                            knownSourceText !== undefined &&
+                            isSameGeneratedText(content, knownSourceText);
+                        const otherUploads = stagedUploads.filter(
+                            (upload) => getUploadFile(upload) !== file,
+                        );
 
-                        if (content) {
+                        if (content && !sourceAlreadySent) {
                             pendingAutoTextRestorations.set(
                                 file,
                                 (sourceText) => {
@@ -1181,14 +1562,120 @@ export default {
                                     );
                                 },
                             );
-                        } else {
-                            pendingAutoTextRestorations.delete(file);
                         }
 
-                        const preserved = preserveSendTextForAutoUpload(
-                            channelId,
-                            content,
-                        );
+                        if (otherUploads.length > 0) {
+                            const messageAttachments = Array.isArray(
+                                message?.attachments,
+                            )
+                                ? message.attachments
+                                : [];
+                            const allOtherUploadsInPayload =
+                                !otherUploads.some(
+                                    isGeneratedLongMessageUpload,
+                                ) &&
+                                otherUploads.every((upload) =>
+                                    messageAttachments.some((attachment: any) =>
+                                        attachmentMatchesUpload(
+                                            attachment,
+                                            upload,
+                                        ),
+                                    ),
+                                );
+
+                            if (!allOtherUploadsInPayload) {
+                                if (uploadState !== "processing") {
+                                    pendingAutoTextFirstChunkSends.delete(file);
+                                }
+                                if (uploadState !== "processing") {
+                                    pendingAutoTextRestorations.delete(file);
+                                }
+                                if (!sourceAlreadySent) {
+                                    preserveSendTextForAutoUpload(
+                                        channelId,
+                                        content,
+                                    );
+                                }
+                                showFailure(
+                                    "SplitLargeMessages: other attachments could not be included with the generated text retry; remove them or send them separately first",
+                                );
+                                return undefined;
+                            }
+
+                            const attachmentSend: PendingAutoTextAttachmentSend = {
+                                uploads: otherUploads,
+                                send: async (
+                                    chunk,
+                                    includeContent,
+                                    excludeUploads,
+                                ) => {
+                                    const firstArgs = buildChunkArgs(
+                                        sendArgs,
+                                        channelId,
+                                        includeContent ? chunk : "",
+                                        true,
+                                    );
+                                    const { index, message: firstMessage } =
+                                        getMessageLocation(firstArgs);
+
+                                    if (!Array.isArray(firstMessage.attachments)) {
+                                        return false;
+                                    }
+
+                                    const attachments =
+                                        firstMessage.attachments.filter(
+                                            (attachment: any) =>
+                                                !isGeneratedFileAttachment(
+                                                    attachment,
+                                                    file,
+                                                    pendingRetryUpload,
+                                                ) &&
+                                                !excludeUploads.some((upload) =>
+                                                    attachmentMatchesUpload(
+                                                        attachment,
+                                                        upload,
+                                                    ),
+                                                ),
+                                        );
+
+                                    if (!includeContent && attachments.length === 0) {
+                                        return false;
+                                    }
+
+                                    firstArgs[index] = {
+                                        ...firstMessage,
+                                        attachments,
+                                    };
+
+                                    await orig(...firstArgs);
+                                    return true;
+                                },
+                            };
+                            const pendingSends =
+                                pendingAutoTextFirstChunkSends.get(file) ?? {
+                                    trailing: [],
+                                };
+
+                            if (
+                                !autoTextFirstChunkStarted.has(file) &&
+                                !pendingSends.first
+                            ) {
+                                pendingSends.first = attachmentSend;
+                            } else {
+                                pendingSends.trailing.push(attachmentSend);
+                            }
+                            pendingAutoTextFirstChunkSends.set(
+                                file,
+                                pendingSends,
+                            );
+                        }
+
+                        const preserved = sourceAlreadySent
+                            ? "empty"
+                            : preserveSendTextForAutoUpload(
+                                  channelId,
+                                  content,
+                              );
 
                         if (preserved === "clipboard") {
                             showFailure(
@@ -1202,7 +1689,12 @@ export default {
 
                         if (uploadState === "processing") return undefined;
 
-                        void processAutoTextFile(channelId, file, true).then(
+                        void processAutoTextFile(
+                            channelId,
+                            file,
+                            true,
+                            otherUploads.length > 0,
+                        ).then(
                             (handled) => {
                                 if (handled) return;
 
@@ -1357,8 +1849,7 @@ export default {
                         return orig(...args);
                     }
 
-                    const forceRetry =
-                        autoTextStates.get(file) === "failed";
+                    const forceRetry = getAutoTextState(file) === "failed";
 
                     void processAutoTextFile(
                         channelId,
