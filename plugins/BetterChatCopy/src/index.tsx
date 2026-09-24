@@ -179,8 +179,7 @@ function formatMentions(content: string, channelId: string): string {
         .replace(/<@&(\d+)>/g, (_match, id) => {
             const role = guildId ? GuildRoleStore?.getRole?.(guildId, id) : null;
             return role?.name ? `@${role.name}` : `@${id}`;
-        })
-        .replace(/<a?:([^:]+):\d+>/g, ":$1:");
+        });
 }
 
 function formatBody(message: any, channelId: string): string {
