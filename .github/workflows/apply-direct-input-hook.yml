@@ -20,8 +20,7 @@ jobs:
       - name: Apply direct live ChatInput patch
         shell: bash
         run: |
-          cat .github/reviewfix/direct.patch.b64.* | base64 -d > /tmp/direct.patch
-          git apply /tmp/direct.patch
+          git apply .github/reviewfix/direct.patch
           rm -rf .github/reviewfix .github/workflows/apply-direct-input-hook.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
