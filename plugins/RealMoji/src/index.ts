@@ -13,6 +13,10 @@ import { after, before } from "@vendetta/patcher";
 const emojiRegex =
     /https:\/\/cdn\.discordapp\.com\/emojis\/(\d+)\.(png|webp|gif)(?:\?|$)/i;
 
+const MAX_JUMBO_EMOJIS = 27;
+const unicodeEmojiSequenceRegex =
+    /(?:\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?(?:\p{Emoji_Modifier})?)*(?:[\u{E0020}-\u{E007E}]+\u{E007F})?)/gu;
+
 const EmojiStore = findByStoreName("EmojiStore");
 const RowManager = findByName("RowManager");
 
@@ -99,18 +103,88 @@ function trimOuterWhitespace(content: any[]) {
     }
 }
 
+function countUnicodeEmojiText(value: string): number | null {
+    if (!value.trim()) return 0;
+
+    const matches = value.match(unicodeEmojiSequenceRegex) ?? [];
+    const remainder = value.replace(unicodeEmojiSequenceRegex, "");
+
+    return remainder.trim() === "" && matches.length > 0
+        ? matches.length
+        : null;
+}
+
+function getEmojiOnlyCount(content: any[]): number | null {
+    let hasFreemojiLink = false;
+
+    const countNode = (node: any): number | null => {
+        if (node == null || node === false) return 0;
+
+        if (Array.isArray(node)) {
+            let count = 0;
+
+            for (const child of node) {
+                const childCount = countNode(child);
+                if (childCount == null) return null;
+                count += childCount;
+            }
+
+            return count;
+        }
+
+        if (typeof node === "string") return countUnicodeEmojiText(node);
+        if (typeof node !== "object") return null;
+
+        if (
+            node.type === "link" &&
+            typeof node.target === "string" &&
+            emojiRegex.test(node.target)
+        ) {
+            hasFreemojiLink = true;
+            return 1;
+        }
+
+        if (node.type === "emoji" || node.type === "customEmoji") return 1;
+
+        if (node.type === "text" && typeof node.content === "string") {
+            return countUnicodeEmojiText(node.content);
+        }
+
+        if (Array.isArray(node.content)) return countNode(node.content);
+
+        return null;
+    };
+
+    const count = countNode(content);
+    return hasFreemojiLink && count != null && count > 0 ? count : null;
+}
+
+function setEmojiJumboable(content: any[]) {
+    const visit = (node: any) => {
+        if (Array.isArray(node)) {
+            for (const child of node) visit(child);
+            return;
+        }
+
+        if (!node || typeof node !== "object") return;
+
+        if (node.type === "emoji" || node.type === "customEmoji") {
+            node.jumboable = true;
+        }
+
+        if (Array.isArray(node.content)) visit(node.content);
+    };
+
+    visit(content);
+}
+
 function convertLinks(content: any[]) {
     if (!Array.isArray(content)) return false;
 
-    const meaningful = content.filter((item) => !isWhitespaceText(item));
+    const emojiOnlyCount = getEmojiOnlyCount(content);
     const jumbo =
-        meaningful.length > 0 &&
-        meaningful.every(
-            (item) =>
-                item?.type === "link" &&
-                typeof item?.target === "string" &&
-                emojiRegex.test(item.target),
-        );
+        emojiOnlyCount != null &&
+        emojiOnlyCount <= MAX_JUMBO_EMOJIS;
 
     let converted = false;
 
@@ -132,7 +206,11 @@ function convertLinks(content: any[]) {
         converted = true;
     }
 
-    if (converted) trimOuterWhitespace(content);
+    if (converted) {
+        trimOuterWhitespace(content);
+        if (jumbo) setEmojiJumboable(content);
+    }
+
     return converted;
 }
 
@@ -181,16 +259,17 @@ function convertEmbedOnlyMessage(message: any) {
     if (!urls.length) return false;
 
     const newContent: any[] = [];
+    const jumbo = urls.length <= MAX_JUMBO_EMOJIS;
 
     for (const url of urls) {
-        const emoji = createCustomEmoji(url, true);
+        const emoji = createCustomEmoji(url, jumbo);
         if (!emoji) continue;
 
         if (newContent.length) {
             newContent.push({
                 content: " ",
                 type: "text",
-                jumboable: true,
+                jumboable: jumbo ? true : undefined,
             });
         }
 
