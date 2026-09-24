@@ -841,6 +841,46 @@ export default {
         let liveChatInputRefPatchInstalled = false;
         let nativeMaxLengthDebugShown = false;
 
+        const syncLiveComposerText = (channelId: string, text: string) => {
+            if (!text) return;
+            if (SelectedChannelStore?.getChannelId?.() !== channelId) return;
+
+            const target = currentComposerInputRef?.current;
+            if (!target) return;
+
+            try {
+                if (typeof target.handleTextChanged === "function") {
+                    target.handleTextChanged(text);
+                    return;
+                }
+
+                if (typeof target.setText === "function") {
+                    target.setText(text);
+                }
+            } catch (error) {
+                console.error(
+                    "[SplitLargeMessages] failed to sync restored draft into the live composer",
+                    error,
+                );
+            }
+        };
+
+        const restoreAndSyncUnsentContent = (
+            channelId: string,
+            text: string,
+        ) => {
+            restoreUnsentContent(
+                channelId,
+                text,
+                DraftStore,
+                DraftManager,
+            );
+
+            if (getDraftText(channelId, DraftStore) === text) {
+                syncLiveComposerText(channelId, text);
+            }
+        };
+
         const splitContent = (content: string): MarkdownSplitResult | false =>
             splitMarkdownMessageDetailed(
                 content,
@@ -912,7 +952,12 @@ export default {
                                       validNonShortcutEmojis: [],
                                   };
 
-                        await originalSendMessage(channelId, payload);
+                        await originalSendMessage(
+                            channelId,
+                            payload,
+                            undefined,
+                            { attachmentsToUpload: [] },
+                        );
                         sent++;
 
                         if (sent === 1) onFirstSuccess?.();
@@ -928,11 +973,9 @@ export default {
                     );
 
                     const unsent = getUnsentSource(split, sent);
-                    restoreUnsentContent(
+                    restoreAndSyncUnsentContent(
                         channelId,
                         unsent,
-                        DraftStore,
-                        DraftManager,
                     );
 
                     throw error;
@@ -1107,12 +1150,17 @@ export default {
                         }
 
                         if (!firstChunkAttachmentsSent) {
-                            await originalSendMessage(channelId, {
-                                content: chunks[index],
-                                tts: false,
-                                invalidEmojis: [],
-                                validNonShortcutEmojis: [],
-                            });
+                            await originalSendMessage(
+                                channelId,
+                                {
+                                    content: chunks[index],
+                                    tts: false,
+                                    invalidEmojis: [],
+                                    validNonShortcutEmojis: [],
+                                },
+                                undefined,
+                                { attachmentsToUpload: [] },
+                            );
                         }
 
                         sent++;
@@ -1421,11 +1469,9 @@ export default {
                     DraftManager,
                 );
             } else if (currentDraft !== pending.originalContent) {
-                restoreUnsentContent(
+                restoreAndSyncUnsentContent(
                     pending.channelId,
                     pending.originalContent,
-                    DraftStore,
-                    DraftManager,
                 );
             }
         };
@@ -2208,31 +2254,27 @@ export default {
                                     index < chunks.length;
                                     index++
                                 ) {
-                                    if (index === 0) {
-                                        const firstArgs =
-                                            buildChunkArgs(
-                                                sendArgs,
-                                                channelId!,
-                                                chunks[index],
-                                                true,
-                                            );
-                                        await orig(...firstArgs);
-                                    } else {
-                                        await originalSendMessage(
+                                    const chunkArgs =
+                                        buildChunkArgs(
+                                            sendArgs,
                                             channelId!,
-                                            {
-                                                content:
-                                                    chunks[index],
-                                                tts: false,
-                                                invalidEmojis:
-                                                    message.invalidEmojis ??
-                                                    [],
-                                                validNonShortcutEmojis:
-                                                    message.validNonShortcutEmojis ??
-                                                    [],
-                                            },
+                                            chunks[index],
+                                            index === 0,
                                         );
+
+                                    if (
+                                        index > 0 &&
+                                        chunkArgs.length > 3 &&
+                                        chunkArgs[3] &&
+                                        typeof chunkArgs[3] === "object"
+                                    ) {
+                                        chunkArgs[3] = {
+                                            ...chunkArgs[3],
+                                            attachmentsToUpload: [],
+                                        };
                                     }
+
+                                    await orig(...chunkArgs);
 
                                     sent++;
 
@@ -2258,11 +2300,9 @@ export default {
                                         pendingComposerSend.split,
                                         sent,
                                     );
-                                restoreUnsentContent(
+                                restoreAndSyncUnsentContent(
                                     channelId!,
                                     unsent,
-                                    DraftStore,
-                                    DraftManager,
                                 );
                                 throw error;
                             }
@@ -2556,24 +2596,26 @@ export default {
 
                     try {
                         for (let index = 0; index < chunks.length; index++) {
-                            if (index === 0) {
-                                const firstArgs = buildChunkArgs(
-                                    sendArgs,
-                                    channelId,
-                                    chunks[index],
-                                    true,
-                                );
-                                await orig(...firstArgs);
-                            } else {
-                                await originalSendMessage(channelId, {
-                                    content: chunks[index],
-                                    tts: false,
-                                    invalidEmojis:
-                                        message.invalidEmojis ?? [],
-                                    validNonShortcutEmojis:
-                                        message.validNonShortcutEmojis ?? [],
-                                });
+                            const chunkArgs = buildChunkArgs(
+                                sendArgs,
+                                channelId,
+                                chunks[index],
+                                index === 0,
+                            );
+
+                            if (
+                                index > 0 &&
+                                chunkArgs.length > 3 &&
+                                chunkArgs[3] &&
+                                typeof chunkArgs[3] === "object"
+                            ) {
+                                chunkArgs[3] = {
+                                    ...chunkArgs[3],
+                                    attachmentsToUpload: [],
+                                };
                             }
+
+                            await orig(...chunkArgs);
 
                             sent++;
 
@@ -2588,11 +2630,9 @@ export default {
                         );
 
                         const unsent = getUnsentSource(split, sent);
-                        restoreUnsentContent(
+                        restoreAndSyncUnsentContent(
                             channelId,
                             unsent,
-                            DraftStore,
-                            DraftManager,
                         );
 
                         throw error;
