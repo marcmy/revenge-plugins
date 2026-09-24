@@ -1,5 +1,5 @@
 import { find, findAll, findByName, findByProps, findByStoreName } from "@vendetta/metro";
-import { FluxDispatcher, ReactNative, i18n } from "@vendetta/metro/common";
+import { FluxDispatcher, ReactNative } from "@vendetta/metro/common";
 import { after, before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 import { findInReactTree } from "@vendetta/utils";
@@ -40,6 +40,8 @@ const channelDiscoveryTimeouts = new Set<ReturnType<typeof setTimeout>>();
 const patchedLengthModules = new Map<Record<string, any>, Record<string, number>>();
 const patchedDialogTargets = new Set<object>();
 const patchedComposerTargets = new Set<object>();
+const patchedLiveComposerInstances = new Set<object>();
+const liveComposerAttachTimeouts = new Set<ReturnType<typeof setTimeout>>();
 const patchedGuardTargets = new Set<object>();
 const channelQueues = new Map<string, Promise<void>>();
 const inFlightSendKeys = new Set<string>();
@@ -85,6 +87,11 @@ type PendingComposerSend = {
 function clearChannelDiscoveryTimeouts() {
     for (const timeout of channelDiscoveryTimeouts) clearTimeout(timeout);
     channelDiscoveryTimeouts.clear();
+}
+
+function clearLiveComposerAttachTimeouts() {
+    for (const timeout of liveComposerAttachTimeouts) clearTimeout(timeout);
+    liveComposerAttachTimeouts.clear();
 }
 
 type MessageLocation = {
@@ -828,32 +835,6 @@ export default {
 
         let currentComposerInputRef: any;
         let liveChatInputRefPatchInstalled = false;
-
-        const getSendLabel = () => {
-            try {
-                if (i18n?.Messages?.SEND) return i18n.Messages.SEND;
-
-                const { intl, t: intlMap } = findByProps("intl") ?? {};
-                const { runtimeHashMessageKey } =
-                    findByProps("runtimeHashMessageKey") ?? {};
-                if (intl && intlMap && runtimeHashMessageKey) {
-                    return intl.string(intlMap[runtimeHashMessageKey("SEND")]);
-                }
-            } catch {}
-
-            return null;
-        };
-
-        const isSendPress = (props: Record<string, any>) => {
-            const onPress = props?.onPress;
-            if (typeof onPress !== "function") return false;
-            if (onPress.name === "handlePressSend") return true;
-
-            const sendLabel = getSendLabel();
-            return Boolean(
-                sendLabel && props?.accessibilityLabel === sendLabel,
-            );
-        };
 
         const splitContent = (content: string): MarkdownSplitResult | false =>
             splitMarkdownMessageDetailed(
@@ -1675,6 +1656,108 @@ export default {
             return pending;
         };
 
+        const patchLiveComposerInstance = (
+            inputRef: any,
+            attempt = 0,
+        ) => {
+            if (unloaded || loadGeneration !== lifecycleGeneration) return;
+
+            currentComposerInputRef = inputRef;
+            const target = inputRef?.current;
+
+            if (!target?.handleTextChanged) {
+                if (attempt >= 40) {
+                    logDebug("Live ChatInput ref never became ready");
+                    return;
+                }
+
+                let timeout: ReturnType<typeof setTimeout>;
+                timeout = setTimeout(() => {
+                    liveComposerAttachTimeouts.delete(timeout);
+                    patchLiveComposerInstance(inputRef, attempt + 1);
+                }, 100);
+                liveComposerAttachTimeouts.add(timeout);
+                return;
+            }
+
+            if (patchedLiveComposerInstances.has(target)) return;
+
+            let patchedCount = 0;
+            for (const method of [
+                "handlePressSend",
+                "handleSendMessage",
+            ] as const) {
+                if (typeof target[method] !== "function") continue;
+
+                try {
+                    runtimeUnpatches.push(
+                        before(method, target, () => {
+                            const channelId =
+                                SelectedChannelStore?.getChannelId?.();
+                            if (!isSnowflakeLike(channelId)) return;
+
+                            const draft = getDraftText(
+                                channelId,
+                                DraftStore,
+                            );
+                            if (
+                                !draft ||
+                                draft.length <= getMaxLength()
+                            ) {
+                                return;
+                            }
+
+                            const uploads = getChannelUploads(
+                                channelId,
+                                UploadAttachmentStore,
+                            );
+                            if (uploads.length > 0) return;
+
+                            const existing =
+                                pendingComposerSends.get(channelId);
+                            if (existing) return;
+
+                            const pending =
+                                prepareLiveComposerSplit(target);
+                            if (!pending) {
+                                showToast(
+                                    `SplitLM debug: ${method} hook ran, split was not prepared`,
+                                    getAssetIDByName("Small"),
+                                );
+                                return;
+                            }
+
+                            showToast(
+                                `SplitLM debug: ${method} intercepted`,
+                                getAssetIDByName("Small"),
+                            );
+                            logDebug(
+                                "Direct live composer interception",
+                                method,
+                                channelId,
+                                draft.length,
+                                pending.firstChunk.length,
+                            );
+                        }),
+                    );
+                    patchedCount++;
+                } catch (error) {
+                    console.error(
+                        `[SplitLargeMessages] failed to patch live ${method}`,
+                        error,
+                    );
+                }
+            }
+
+            if (patchedCount > 0) {
+                patchedLiveComposerInstances.add(target);
+                logDebug(
+                    "Patched live ChatInput instance",
+                    patchedCount,
+                );
+            }
+        };
+
         const patchLiveChatInputRef = () => {
             if (liveChatInputRefPatchInstalled) return;
 
@@ -1692,151 +1775,22 @@ export default {
                         (_args: any[], ret: any) => {
                             try {
                                 const inputRef = findChatInputRef(ret);
-                                if (inputRef) currentComposerInputRef = inputRef;
+                                if (inputRef) {
+                                    currentComposerInputRef = inputRef;
+                                    patchLiveComposerInstance(inputRef);
+                                }
                             } catch {}
                             return ret;
                         },
                     ),
                 );
                 liveChatInputRefPatchInstalled = true;
-                logDebug("Captured live ChatInput ref");
+                logDebug("Installed live ChatInput ref capture");
             } catch (error) {
                 console.error(
                     "[SplitLargeMessages] failed to capture live chat input ref",
                     error,
                 );
-            }
-        };
-
-        const resumeLiveComposerSend = (
-            pending: PendingComposerSend,
-            preferredMethod: "handlePressSend" | "handleSendMessage",
-            initialHandler: any,
-            attempt = 0,
-        ) => {
-            if (pendingComposerSends.get(pending.channelId) !== pending) return;
-
-            const target = currentComposerInputRef?.current ?? pending.target;
-            const handler =
-                target?.[preferredMethod] ??
-                target?.handleSendMessage ??
-                target?.handlePressSend;
-
-            // React chat-input handlers close over the current render's text.
-            // Wait for handleTextChanged to produce a fresh handler before
-            // resuming; otherwise the stale closure immediately reopens the
-            // native Nitro "message too long" dialog.
-            if (
-                typeof handler === "function" &&
-                handler === initialHandler &&
-                attempt < 8
-            ) {
-                setTimeout(
-                    () =>
-                        resumeLiveComposerSend(
-                            pending,
-                            preferredMethod,
-                            initialHandler,
-                            attempt + 1,
-                        ),
-                    16,
-                );
-                return;
-            }
-
-            if (typeof handler !== "function") {
-                restoreComposerBridge(pending);
-                return;
-            }
-
-            try {
-                logDebug(
-                    "Resuming send with fresh composer handler",
-                    preferredMethod,
-                    pending.channelId,
-                    attempt,
-                );
-                handler.call(target);
-            } catch (error) {
-                console.error(
-                    "[SplitLargeMessages] fresh composer send failed",
-                    error,
-                );
-                restoreComposerBridge(pending);
-            }
-        };
-
-        const patchSendButton = () => {
-            const hook = ([props]: [Record<string, any>]) => {
-                try {
-                    if (!isSendPress(props)) return;
-
-                    const onPress = props.onPress as (...args: any[]) => any;
-                    if ((onPress as any).__splitLargeMessagesPatched) return;
-
-                    const wrapped = function (this: any, ...pressArgs: any[]) {
-                        const channelId =
-                            SelectedChannelStore?.getChannelId?.();
-                        const target = currentComposerInputRef?.current;
-
-                        if (
-                            !target?.handleTextChanged ||
-                            !isSnowflakeLike(channelId)
-                        ) {
-                            return onPress.apply(this, pressArgs);
-                        }
-
-                        if (pendingComposerSends.has(channelId)) {
-                            showToast(
-                                "SplitLargeMessages: identical long message already queued",
-                                getAssetIDByName("Small"),
-                            );
-                            return undefined;
-                        }
-
-                        const pending = prepareLiveComposerSplit(target);
-                        if (!pending) {
-                            return onPress.apply(this, pressArgs);
-                        }
-
-                        const preferredMethod =
-                            typeof target.handlePressSend === "function"
-                                ? "handlePressSend"
-                                : "handleSendMessage";
-                        const initialHandler = target[preferredMethod];
-
-                        // Do not run the stale onPress closure. Resume through
-                        // the fresh chat-input ref after React commits the first
-                        // chunk, so Discord's own validation sees <= 2000 chars.
-                        setTimeout(
-                            () =>
-                                resumeLiveComposerSend(
-                                    pending,
-                                    preferredMethod,
-                                    initialHandler,
-                                ),
-                            0,
-                        );
-                        return undefined;
-                    };
-
-                    (wrapped as any).__splitLargeMessagesPatched = true;
-                    props.onPress = wrapped;
-                } catch {}
-            };
-
-            try {
-                runtimeUnpatches.push(
-                    before("type", ReactNative.Pressable, hook),
-                );
-            } catch {}
-
-            if (ReactNative.TouchableOpacity) {
-                try {
-                    runtimeUnpatches.push(
-                        before("type", ReactNative.TouchableOpacity, hook),
-                    );
-                } catch {}
             }
         };
 
@@ -2153,6 +2107,10 @@ export default {
                     pendingComposerSend &&
                     content === pendingComposerSend.firstChunk
                 ) {
+                    showToast(
+                        "SplitLM debug: sendMessage reached first chunk",
+                        getAssetIDByName("Small"),
+                    );
                     clearTimeout(
                         pendingComposerSend.restoreTimeout,
                     );
@@ -2492,6 +2450,11 @@ export default {
                     return orig(...sendArgs);
                 }
 
+                showToast(
+                    "SplitLM debug: sendMessage reached oversized text",
+                    getAssetIDByName("Small"),
+                );
+
                 const split = splitContent(content);
 
                 if (split === false || split.chunks.length === 0) {
@@ -2667,7 +2630,6 @@ export default {
             );
         } catch {}
 
-        patchSendButton();
         patchRuntimeTargets();
 
         patchSweepInterval = setInterval(() => {
@@ -2690,6 +2652,7 @@ export default {
         unloaded = true;
         lifecycleGeneration++;
         clearChannelDiscoveryTimeouts();
+        clearLiveComposerAttachTimeouts();
 
         unpatchUpload?.();
         unpatchUpload = undefined;
@@ -2715,6 +2678,7 @@ export default {
         activeComposerFirstChunks.clear();
         patchedDialogTargets.clear();
         patchedComposerTargets.clear();
+        patchedLiveComposerInstances.clear();
         patchedGuardTargets.clear();
         channelQueues.clear();
         inFlightSendKeys.clear();
