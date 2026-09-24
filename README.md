@@ -15,3 +15,4 @@ https://marcmy.github.io/revenge-plugins/`PLUGIN_NAME`
 - MessageHistory: [Install Link](https://marcmy.github.io/revenge-plugins/MessageHistory/)
 - LongScreenshotFix: [Install Link](https://marcmy.github.io/revenge-plugins/LongScreenshotFix/)
 - BetterChatCopy: [Install Link](https://marcmy.github.io/revenge-plugins/BetterChatCopy/)
+- RealMoji: [Install Link](https://marcmy.github.io/revenge-plugins/RealMoji/)
