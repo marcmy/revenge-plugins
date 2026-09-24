@@ -1,0 +1,22 @@
+{
+  "name": "RealMoji",
+  "description": "Makes Freemoji CDN links render as real inline emoji, including messages with surrounding text.",
+  "authors": [
+    {
+      "name": "redstonekasi",
+      "id": "265064055490871297"
+    },
+    {
+      "name": "Purple_Ξye™",
+      "id": "646535537334812682"
+    },
+    {
+      "name": "marcmy",
+      "id": "92076581404545024"
+    }
+  ],
+  "main": "src/index.ts",
+  "vendetta": {
+    "icon": "ReactionIcon"
+  }
+}
