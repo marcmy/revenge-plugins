@@ -839,7 +839,6 @@ export default {
 
         let currentComposerInputRef: any;
         let liveChatInputRefPatchInstalled = false;
-        let nativeMaxLengthDebugShown = false;
 
         const syncLiveComposerText = (channelId: string, text: string) => {
             if (!text) return;
@@ -1771,17 +1770,8 @@ export default {
                             const pending =
                                 prepareLiveComposerSplit(target);
                             if (!pending) {
-                                showToast(
-                                    `SplitLM debug: ${method} hook ran, split was not prepared`,
-                                    getAssetIDByName("Small"),
-                                );
                                 return;
                             }
-
-                            showToast(
-                                `SplitLM debug: ${method} intercepted`,
-                                getAssetIDByName("Small"),
-                            );
                             logDebug(
                                 "Direct live composer interception",
                                 method,
@@ -1877,16 +1867,7 @@ export default {
                                 : "";
 
                             if (draft.length <= result) {
-                                nativeMaxLengthDebugShown = false;
                                 return result;
-                            }
-
-                            if (!nativeMaxLengthDebugShown) {
-                                nativeMaxLengthDebugShown = true;
-                                showToast(
-                                    "SplitLM debug: native length gate bypassed",
-                                    getAssetIDByName("Small"),
-                                );
                             }
 
                             // Discord mobile validates content length through
@@ -2224,10 +2205,6 @@ export default {
                     pendingComposerSend &&
                     content === pendingComposerSend.firstChunk
                 ) {
-                    showToast(
-                        "SplitLM debug: sendMessage reached first chunk",
-                        getAssetIDByName("Small"),
-                    );
                     clearTimeout(
                         pendingComposerSend.restoreTimeout,
                     );
@@ -2560,11 +2537,6 @@ export default {
                 ) {
                     return orig(...sendArgs);
                 }
-
-                showToast(
-                    "SplitLM debug: sendMessage reached oversized text",
-                    getAssetIDByName("Small"),
-                );
 
                 const split = splitContent(content);
 
