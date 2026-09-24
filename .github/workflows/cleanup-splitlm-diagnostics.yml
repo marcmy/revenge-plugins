@@ -1,0 +1,34 @@
+name: Clean SplitLargeMessages diagnostics
+
+on:
+  push:
+    branches:
+      - cleanup/split-large-message-diagnostics
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: cleanup/split-large-message-diagnostics
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Remove temporary diagnostics
+        run: python .github/reviewfix/cleanup-splitlm-diagnostics.py
+      - name: Commit cleanup and remove helper
+        shell: bash
+        run: |
+          rm -rf .github/reviewfix .github/workflows/cleanup-splitlm-diagnostics.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add plugins/SplitLargeMessages/src/stableEntry2.ts .github
+          git diff --cached --check
+          git commit -m "chore: remove SplitLargeMessages diagnostic toasts"
+          git push origin HEAD:cleanup/split-large-message-diagnostics
