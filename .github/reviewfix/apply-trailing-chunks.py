@@ -63,8 +63,6 @@ rep(
         const splitContent = (content: string): MarkdownSplitResult | false =>'''
 )
 
-# Fix all ordinary unsent restorations inside onLoad to update the visible composer
-# once DraftStore restoration succeeds.
 rep(
 '''                    restoreUnsentContent(
                         channelId,
@@ -75,8 +73,20 @@ rep(
 '''                    restoreAndSyncUnsentContent(
                         channelId,
                         unsent,
-                    );''',
-2
+                    );'''
+)
+
+rep(
+'''                        restoreUnsentContent(
+                            channelId,
+                            unsent,
+                            DraftStore,
+                            DraftManager,
+                        );''',
+'''                        restoreAndSyncUnsentContent(
+                            channelId,
+                            unsent,
+                        );'''
 )
 
 rep(
@@ -105,9 +115,6 @@ rep(
                                 );'''
 )
 
-# Reuse Discord's full original argument vector for every intercepted chunk.
-# Current mobile sendMessage uses channelId, parsedMessage, undefined, options;
-# the old 2-argument trailing calls fail immediately on chunk 2+.
 rep(
 '''                                    if (index === 0) {
                                         const firstArgs =
@@ -198,7 +205,6 @@ rep(
                             await orig(...chunkArgs);'''
 )
 
-# Internal non-intercepted send helpers also need the current mobile call shape.
 rep(
 '''                        await originalSendMessage(channelId, payload);''',
 '''                        await originalSendMessage(
