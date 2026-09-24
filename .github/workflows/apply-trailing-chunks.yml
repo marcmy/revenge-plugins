@@ -1,0 +1,34 @@
+name: Apply trailing chunk fix
+
+on:
+  push:
+    branches:
+      - fix/split-large-message-trailing-chunks
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fix/split-large-message-trailing-chunks
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - name: Apply trailing chunk patch
+        run: python .github/reviewfix/apply-trailing-chunks.py
+      - name: Commit fix and remove helper
+        shell: bash
+        run: |
+          rm -rf .github/reviewfix .github/workflows/apply-trailing-chunks.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add plugins/SplitLargeMessages/src/stableEntry2.ts .github
+          git diff --cached --check
+          git commit -m "fix: preserve mobile send args for trailing chunks"
+          git push origin HEAD:fix/split-large-message-trailing-chunks
