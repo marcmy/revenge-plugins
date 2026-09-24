@@ -42,6 +42,7 @@ const patchedDialogTargets = new Set<object>();
 const patchedComposerTargets = new Set<object>();
 const patchedLiveComposerInstances = new Set<object>();
 const liveComposerAttachTimeouts = new Set<ReturnType<typeof setTimeout>>();
+const patchedNativeMaxLengthTargets = new Set<object>();
 const patchedGuardTargets = new Set<object>();
 const channelQueues = new Map<string, Promise<void>>();
 const inFlightSendKeys = new Set<string>();
@@ -812,6 +813,9 @@ export default {
         const DraftStore = findByStoreName("DraftStore") ?? findByProps("getDraft");
         const DraftManager = findByProps("clearDraft", "saveDraft");
         const UploadManager = findByProps("clearAll");
+        const NativeMessageMaxLength =
+            findByProps("getMaxMessageLength", "default") ??
+            findByProps("getMaxMessageLength");
 
         if (!MessageActions || typeof MessageActions.sendMessage !== "function") {
             showFailure("SplitLargeMessages: send API unavailable");
@@ -835,6 +839,7 @@ export default {
 
         let currentComposerInputRef: any;
         let liveChatInputRefPatchInstalled = false;
+        let nativeMaxLengthDebugShown = false;
 
         const splitContent = (content: string): MarkdownSplitResult | false =>
             splitMarkdownMessageDetailed(
@@ -1794,6 +1799,71 @@ export default {
             }
         };
 
+        const patchNativeMessageMaxLength = () => {
+            const target = NativeMessageMaxLength;
+            if (
+                !target ||
+                patchedNativeMaxLengthTargets.has(target) ||
+                typeof target.getMaxMessageLength !== "function"
+            ) {
+                return;
+            }
+
+            try {
+                runtimeUnpatches.push(
+                    instead(
+                        "getMaxMessageLength",
+                        target,
+                        (args: any[], orig: (...callArgs: any[]) => any) => {
+                            const result = orig(...args);
+                            if (
+                                typeof result !== "number" ||
+                                result <= 0 ||
+                                result > 10000
+                            ) {
+                                return result;
+                            }
+
+                            const channelId =
+                                SelectedChannelStore?.getChannelId?.();
+                            const draft = isSnowflakeLike(channelId)
+                                ? getDraftText(channelId, DraftStore)
+                                : "";
+
+                            if (draft.length <= result) {
+                                nativeMaxLengthDebugShown = false;
+                                return result;
+                            }
+
+                            if (!nativeMaxLengthDebugShown) {
+                                nativeMaxLengthDebugShown = true;
+                                showToast(
+                                    "SplitLM debug: native length gate bypassed",
+                                    getAssetIDByName("Small"),
+                                );
+                            }
+
+                            // Discord mobile validates content length through
+                            // useMessageMaxLength.getMaxMessageLength() before
+                            // chatInputSendMessage / MessageActions.sendMessage.
+                            // Let the oversized text reach our downstream
+                            // splitter; that splitter still uses Discord-sized
+                            // 2k/4k chunks.
+                            return 1_000_000;
+                        },
+                    ),
+                );
+
+                patchedNativeMaxLengthTargets.add(target);
+                logDebug("Patched native getMaxMessageLength gate");
+            } catch (error) {
+                console.error(
+                    "[SplitLargeMessages] failed to patch native max message length",
+                    error,
+                );
+            }
+        };
+
         const patchTooLongGuardMethods = () => {
             const booleanMethods = MESSAGE_COMPOSER_GUARD_METHODS;
 
@@ -1959,6 +2029,7 @@ export default {
             if (unloaded) return;
 
             patchLiveChatInputRef();
+            patchNativeMessageMaxLength();
             patchMessageLengthConstants();
             patchComposerSendTargets();
             patchTooLongGuardMethods();
@@ -2679,6 +2750,7 @@ export default {
         patchedDialogTargets.clear();
         patchedComposerTargets.clear();
         patchedLiveComposerInstances.clear();
+        patchedNativeMaxLengthTargets.clear();
         patchedGuardTargets.clear();
         channelQueues.clear();
         inFlightSendKeys.clear();
