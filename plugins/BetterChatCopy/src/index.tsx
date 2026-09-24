@@ -179,6 +179,13 @@ function formatMentions(content: string, channelId: string): string {
         .replace(/<@&(\d+)>/g, (_match, id) => {
             const role = guildId ? GuildRoleStore?.getRole?.(guildId, id) : null;
             return role?.name ? `@${role.name}` : `@${id}`;
+        })
+        .replace(/<a?:([^:]+):\d+>/g, (_match, name) => {
+            // Discord mobile promotes pasted custom-emoji tokens into rich
+            // editor nodes and can relocate those nodes to the end of a
+            // multi-line paste. A WORD JOINER keeps the shortcode visually
+            // identical while preventing that parser from recognizing it.
+            return `:\u2060${name}:`;
         });
 }
 
