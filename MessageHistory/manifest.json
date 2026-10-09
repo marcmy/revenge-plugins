@@ -1,0 +1,1 @@
+{"name":"MessageHistory","description":"Logs edited and deleted messages without exposing edit history in message content.","authors":[{"name":"marcmy","id":"92076581404545024"}],"main":"index.js","vendetta":{"icon":"ic_history_24px"},"hash":"9f3f88ad92dc4b12f73bb68857714bf939462c84eb9f5d3196f931665788275c"}
