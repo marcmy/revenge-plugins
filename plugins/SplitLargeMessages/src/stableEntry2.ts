@@ -2051,6 +2051,7 @@ export default {
         };
 
         let patchSweepAttempts = 0;
+        let channelFullScanDone = false;
 
         const patchRuntimeTargets = () => {
             if (unloaded) return;
@@ -2687,9 +2688,22 @@ export default {
                     channelDiscoveryTimeouts.delete(timeout);
                     if (unloaded || loadGeneration !== lifecycleGeneration) return;
 
-                    patchRuntimeTargets();
+                    // Perform the expensive global Metro discovery at most once
+                    // after a channel becomes active. Repeating the four findAll
+                    // scans on every CHANNEL_SELECT blocks UI navigation.
+                    if (!channelFullScanDone) {
+                        channelFullScanDone = true;
+                        patchRuntimeTargets();
+                    } else {
+                        // New composers can still mount on later channel changes.
+                        patchLiveChatInputRef();
+                        checkExistingAutoTextUploads();
+                    }
 
-                    if (attempt + 1 < CHANNEL_DISCOVERY_MAX_ATTEMPTS) {
+                    if (
+                        !liveChatInputRefPatchInstalled &&
+                        attempt + 1 < CHANNEL_DISCOVERY_MAX_ATTEMPTS
+                    ) {
                         scheduleDiscoveryAttempt(attempt + 1);
                     }
                 },
