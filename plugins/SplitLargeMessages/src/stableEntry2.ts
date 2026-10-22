@@ -1,4 +1,4 @@
-import { find, findAll, findByName, findByProps, findByStoreName } from "@vendetta/metro";
+import { findByProps, findByStoreName, modules as metroModules } from "@vendetta/metro";
 import { FluxDispatcher, ReactNative } from "@vendetta/metro/common";
 import { after, before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
@@ -144,35 +144,66 @@ function sleep(ms: number): Promise<void> {
 
 function safeObjectValues(value: any): any[] {
     try {
-        return Object.values(value);
+        // Avoid triggering lazy getters while inspecting Discord exports.
+        return Object.values(Object.getOwnPropertyDescriptors(value))
+            .filter((descriptor) => "value" in descriptor)
+            .map((descriptor) => descriptor.value);
     } catch {
         return [];
     }
 }
 
-function findChatInputWrapper() {
-    try {
-        const byName = findByName("ChatInputGuardWrapper", false);
-        if (byName) return byName;
-    } catch {}
+/**
+ * Inspect only modules Discord has already initialized. Revenge's legacy
+ * find/findAll implementation requires modules while scanning, potentially
+ * initializing UI components before their dependencies are ready.
+ */
+function getInitializedMetroExports(): any[] {
+    const exports = new Set<any>();
+    if (!metroModules) return [];
 
-    return find((module: any) => {
-        const name =
-            module?.default?.type?.displayName ??
-            module?.default?.displayName ??
-            module?.type?.displayName ??
-            "";
-        return name === "ChatInputGuardWrapper" || /ChatInput.*Wrapper/i.test(name);
-    });
+    for (const id in metroModules) {
+        try {
+            const entry = (metroModules as any)[id];
+            if (!entry?.isInitialized || entry.hasError) continue;
+
+            const moduleExports = entry.publicModule?.exports;
+            if (!moduleExports || (typeof moduleExports !== "object" && typeof moduleExports !== "function")) continue;
+            exports.add(moduleExports);
+
+            const descriptor = Object.getOwnPropertyDescriptor(moduleExports, "default");
+            const defaultExport = descriptor && "value" in descriptor
+                ? descriptor.value
+                : undefined;
+            if (defaultExport && (typeof defaultExport === "object" || typeof defaultExport === "function")) {
+                exports.add(defaultExport);
+            }
+        } catch {}
+    }
+
+    return [...exports];
 }
 
-function findChatInputRef(ret: any) {
-    const root = ret?.props?.children ?? ret;
-    return (
-        findInReactTree(root, (node: any) => node?.props?.chatInputRef)?.props
-            ?.chatInputRef ??
-        findInReactTree(root, (node: any) => node?.chatInputRef)?.chatInputRef
-    );
+function findChatInputWrapper() {
+    for (const module of getInitializedMetroExports()) {
+        if (!module || typeof module !== "object") continue;
+
+        try {
+            const name =
+                module.default?.type?.displayName ??
+                module.default?.displayName ??
+                module.type?.displayName ??
+                "";
+
+            if (
+                (name === "ChatInputGuardWrapper" || /ChatInput.*Wrapper/i.test(name)) &&
+                typeof module.default === "function"
+            ) {
+                return module;
+            }
+        } catch {}
+    }
+    return undefined;
 }
 
 function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>> {
@@ -205,17 +236,7 @@ function collectTargetsWithMethods(methods: string[]): Array<Record<string, any>
         } catch {}
     };
 
-    const modules = findAll((module) => {
-        try {
-            if (!module || typeof module !== "object") return false;
-            if (hasAnyMethod(module)) return true;
-            return safeObjectValues(module).some(hasAnyMethod);
-        } catch {
-            return false;
-        }
-    }) as Array<Record<string, any>>;
-
-    for (const module of modules) {
+    for (const module of getInitializedMetroExports()) {
         addTarget(module);
         for (const value of safeObjectValues(module)) addTarget(value);
     }
@@ -757,18 +778,7 @@ function patchMessageLengthConstants() {
     const isMessageLengthTarget = (value: any) =>
         hasMessageComposerGuard(value) || hasMessageLengthConstant(value);
 
-    const modules = findAll((module) => {
-        try {
-            return (
-                module &&
-                typeof module === "object" &&
-                (isMessageLengthTarget(module) ||
-                    safeObjectValues(module).some(isMessageLengthTarget))
-            );
-        } catch {
-            return false;
-        }
-    }) as Array<Record<string, any>>;
+    const modules = getInitializedMetroExports();
 
     for (const module of modules) {
         const values = safeObjectValues(module);
