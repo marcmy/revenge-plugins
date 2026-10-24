@@ -3,7 +3,7 @@ updates:
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "thursday"
-      time: "18:00"
+      interval: "daily"
+      time: "12:00"
       timezone: "America/New_York"
+    open-pull-requests-limit: 10
