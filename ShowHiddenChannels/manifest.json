@@ -1,0 +1,1 @@
+{"name":"ShowHiddenChannels","description":"Shows server channels you do not have permission to view, with locked styling and no unread indicators","authors":[{"name":"marcmy","id":"92076581404545024"}],"main":"index.js","vendetta":{"icon":"ic_lock"},"hash":"b25a0b01338b730d048ec91d7f8ae748ae4ef9160c9246cb7602584f918054f8"}
