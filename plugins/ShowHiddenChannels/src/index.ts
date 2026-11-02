@@ -1,5 +1,5 @@
 import { findByProps, findByStoreName } from "@vendetta/metro";
-import { constants } from "@vendetta/metro/common";
+import { constants, FluxDispatcher } from "@vendetta/metro/common";
 import { after, before, instead } from "@vendetta/patcher";
 import { storage } from "@vendetta/plugin";
 import { showConfirmationAlert } from "@vendetta/ui/alerts";
@@ -11,6 +11,7 @@ const seenGuildChannels = new Set<any>();
 
 const IDENTIFY_OPCODE = 2;
 const CHANNEL_OBFUSCATION_CAPABILITY = 1 << 15;
+const GATEWAY_RECONNECT_DELAY_MS = 3000;
 
 let ChannelListStore: any;
 let ChannelStore: any;
@@ -29,6 +30,8 @@ let gatewayReconnectAttempted = false;
 let gatewayReconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let pluginEnabled = false;
 let forceFullGuildSyncOnNextIdentify = false;
+let identifiedWithoutObfuscation = false;
+let patchedGatewaySocket: any;
 
 // PermissionStore.can stays fully real outside the tiny synchronous window in
 // which Discord recomputes one hidden channel's channel-list state.
@@ -483,6 +486,9 @@ function patchGatewayIdentifyPayload() {
         return;
     }
 
+    if (socket === patchedGatewaySocket) return;
+    patchedGatewaySocket = socket;
+
     safeRegisterPatch(() =>
         before("send", socket, (args) => {
             const [opcode, payload] = args;
@@ -495,14 +501,20 @@ function patchGatewayIdentifyPayload() {
             const capabilities = Number(payload.capabilities);
             if (Number.isFinite(capabilities)) {
                 payload.capabilities = capabilities & ~CHANNEL_OBFUSCATION_CAPABILITY;
+                identifiedWithoutObfuscation = true;
             }
 
             // An existing mobile channel cache may contain the obfuscated
             // records from the previous session. Force a full guild/channel
             // sync only for the one fresh IDENTIFY initiated by this plugin.
+            // Keep the rest of client_state; the mobile cache relies on it.
             const clearedChannelCacheVersions = forceFullGuildSyncOnNextIdentify;
             if (clearedChannelCacheVersions) {
-                payload.client_state = { guild_versions: {} };
+                const clientState =
+                    payload.client_state && typeof payload.client_state === "object"
+                        ? payload.client_state
+                        : {};
+                payload.client_state = { ...clientState, guild_versions: {} };
                 forceFullGuildSyncOnNextIdentify = false;
             }
 
@@ -515,12 +527,17 @@ function patchGatewayIdentifyPayload() {
 }
 
 function reidentifyGatewayWithoutChannelObfuscation() {
-    if (gatewayReconnectAttempted || !GatewayConnectionStore?.getSocket) return;
-    gatewayReconnectAttempted = true;
+    if (!pluginEnabled || identifiedWithoutObfuscation) return;
+    if (gatewayReconnectAttempted || gatewayReconnectTimer != null) return;
+    if (!GatewayConnectionStore?.getSocket) return;
 
+    // Only reached once the current session is fully open, so READY has been
+    // processed. Wait a little longer so startup work settles before the
+    // connection is cycled.
     gatewayReconnectTimer = setTimeout(() => {
         gatewayReconnectTimer = undefined;
-        if (!pluginEnabled) return;
+        if (!pluginEnabled || identifiedWithoutObfuscation || gatewayReconnectAttempted) return;
+        gatewayReconnectAttempted = true;
 
         try {
             const socket = GatewayConnectionStore.getSocket();
@@ -530,16 +547,21 @@ function reidentifyGatewayWithoutChannelObfuscation() {
             // capability that controls whether private channel metadata is
             // obfuscated. A RESUME keeps the old capability set. Preserve the
             // auth token while closing, then invalidate only the session so the
-            // reconnect takes Discord's IDENTIFY path without emitting a user
-            // disconnect/reset during startup.
+            // reconnect takes Discord's IDENTIFY path.
             if (socket.isClosed?.()) return;
 
+            patchGatewayIdentifyPayload();
             forceFullGuildSyncOnNextIdentify = true;
             socket.close(true);
             socket.sessionId = null;
             setTimeout(() => {
                 try {
                     const currentSocket = GatewayConnectionStore?.getSocket?.() ?? socket;
+
+                    // Discord may already be reconnecting on its own; a second
+                    // connect() would race it with a parallel connection.
+                    if (currentSocket?.isClosed?.() === false) return;
+
                     currentSocket?.connect?.();
                     log("reidentified gateway without private channel metadata obfuscation");
                 } catch (error) {
@@ -549,7 +571,32 @@ function reidentifyGatewayWithoutChannelObfuscation() {
         } catch (error) {
             console.error("[ShowHiddenChannels] failed to reidentify gateway", error);
         }
-    }, 500);
+    }, GATEWAY_RECONNECT_DELAY_MS);
+}
+
+function handleConnectionOpen() {
+    // The socket may not have existed when the plugin loaded.
+    patchGatewayIdentifyPayload();
+
+    // Normally the plugin loads before Discord's first IDENTIFY and has
+    // already stripped the capability, so no reconnect is needed. Cycle the
+    // connection only when this session was identified without the patch.
+    reidentifyGatewayWithoutChannelObfuscation();
+}
+
+function subscribeToConnectionOpen() {
+    try {
+        FluxDispatcher?.subscribe?.("CONNECTION_OPEN", handleConnectionOpen);
+        unpatches.push(() => FluxDispatcher?.unsubscribe?.("CONNECTION_OPEN", handleConnectionOpen));
+    } catch (error) {
+        console.error("[ShowHiddenChannels] failed to subscribe to CONNECTION_OPEN", error);
+    }
+
+    // When the plugin is enabled at runtime, the current session opened before
+    // it loaded and CONNECTION_OPEN will not fire again.
+    try {
+        if (GatewayConnectionStore?.isConnected?.()) handleConnectionOpen();
+    } catch {}
 }
 
 function patchHiddenChannelNavigation() {
@@ -619,7 +666,7 @@ export default {
         patchReadStateStore();
         patchChannelIcons();
         patchHiddenChannelNavigation();
-        reidentifyGatewayWithoutChannelObfuscation();
+        subscribeToConnectionOpen();
 
         try {
             ChannelListStore.emitChange?.();
@@ -632,6 +679,8 @@ export default {
         pluginEnabled = false;
         gatewayReconnectAttempted = false;
         forceFullGuildSyncOnNextIdentify = false;
+        identifiedWithoutObfuscation = false;
+        patchedGatewaySocket = undefined;
         if (gatewayReconnectTimer != null) {
             clearTimeout(gatewayReconnectTimer);
             gatewayReconnectTimer = undefined;
