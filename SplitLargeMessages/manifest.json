@@ -1,0 +1,1 @@
+{"name":"SplitLargeMessages","description":"Automatically splits messages larger than 2000/4000 characters","authors":[{"name":"marcmy","id":"92076581404545024"}],"main":"index.js","vendetta":{"icon":"ic_messages"},"hash":"440c7b173ee0bbf8a0d87eb1e0eaeda6abe4173ffc024dc2c8ff3e578570c6ed"}
